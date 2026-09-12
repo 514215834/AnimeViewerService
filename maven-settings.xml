@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 项目级 Maven 配置：构建时用 -s maven-settings.xml 显式传入。
+     本机 Maven 全局配置（conf/settings.xml）将 mirrorOf=* 指向内网 Nexus（10.1.4.161），
+     在本工程内覆盖为阿里云公共镜像并复用全局 localRepository 缓存。 -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <localRepository>G:\repository</localRepository>
+  <mirrors>
+    <mirror>
+      <id>aliyun-public</id>
+      <mirrorOf>*,!central</mirrorOf>
+      <name>Aliyun Public</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+  </mirrors>
+</settings>

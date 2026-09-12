@@ -1,0 +1,36 @@
+server:
+  # S1：默认仅绑定本机回环；局域网监听需显式改为 0.0.0.0（启动参数 --server.address=0.0.0.0）
+  port: 8787
+  address: 127.0.0.1
+
+spring:
+  application:
+    name: AnimeViewerService
+  jackson:
+    default-property-inclusion: non_null
+
+av:
+  # 运行数据目录（token / SQLite 索引库），相对 jar 工作目录
+  data-dir: ./data
+  # ffmpeg / ffprobe 可执行文件：默认从 PATH 探测；未入 PATH 时填完整路径
+  ffmpeg-path: ffmpeg
+  ffprobe-path: ffprobe
+  bangumi:
+    base-url: https://api.bgm.tv
+    # 服务端自定义合规 UA（官方 API 要求可识别的 User-Agent）
+    user-agent: "AnimeViewerService/${project.version} (personal media server; https://github.com/jinfenglong/AnimeViewer)"
+    match-throttle-ms: 400
+    # 可选 HTTP 代理（api.bgm.tv 直连被重置的环境下填代理地址，如本机 Clash：127.0.0.1:7897）
+    proxy-host: ""
+    proxy-port: 7897
+  scan:
+    # 启动时自动执行 mtime 增量扫描
+    auto-on-start: true
+    probe-timeout-seconds: 30
+  remux:
+    # 同时进行的 ffmpeg 转封装进程上限
+    max-concurrent: 3
+
+logging:
+  level:
+    root: info
