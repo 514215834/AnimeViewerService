@@ -51,21 +51,24 @@ public class MediaRepository {
     /* ── 媒体文件 ── */
 
     private static final String FILE_COLUMNS = """
-            id, dir_id, path, name, ext, size, mtime, duration_sec, container, vcodec, acodec,
-            width, height, parsed_title, parsed_episode, match_state, subject_id, subject_name,
-            subject_name_cn, episode_sort, auto_bound, matched_at, probed_at, error
+            f.id, f.dir_id, f.path, f.name, f.ext, f.size, f.mtime, f.duration_sec, f.container, f.vcodec, f.acodec,
+            f.width, f.height, f.parsed_title, f.parsed_episode, f.match_state, f.subject_id, f.subject_name,
+            f.subject_name_cn, f.episode_sort, f.auto_bound, f.matched_at, f.probed_at, f.error,
+            f.download_task_id, dt.name AS download_task_name
             """;
+    /** v0.16：联表 download_tasks 带出「来自下载任务」溯源名（LEFT JOIN，dt.id 主键不产生行重复） */
+    private static final String FILE_FROM = " FROM media_files f LEFT JOIN download_tasks dt ON dt.id = f.download_task_id";
 
     public List<MediaFileDto> listFiles(Long dirId, String state, String q, int limit, int offset) {
-        StringBuilder sql = new StringBuilder("SELECT " + FILE_COLUMNS + " FROM media_files WHERE 1=1");
-        var query = db.sql(appendFilters(sql, dirId, state, q) + " ORDER BY id DESC LIMIT ? OFFSET ?");
+        StringBuilder sql = new StringBuilder("SELECT " + FILE_COLUMNS + FILE_FROM + " WHERE 1=1");
+        var query = db.sql(appendFilters(sql, dirId, state, q) + " ORDER BY f.id DESC LIMIT ? OFFSET ?");
         bindFilters(query, dirId, state, q);
         query.param(limit).param(offset);
         return query.query(MediaRepository::mapFile).list();
     }
 
     public long countFiles(Long dirId, String state, String q) {
-        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM media_files WHERE 1=1");
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*)" + FILE_FROM + " WHERE 1=1");
         var query = db.sql(appendFilters(sql, dirId, state, q));
         bindFilters(query, dirId, state, q);
         return query.query(Long.class).single();
@@ -81,7 +84,7 @@ public class MediaRepository {
     }
 
     public Optional<MediaFileDto> findFile(long id) {
-        return db.sql("SELECT " + FILE_COLUMNS + " FROM media_files WHERE id = ?")
+        return db.sql("SELECT " + FILE_COLUMNS + FILE_FROM + " WHERE f.id = ?")
                 .param(id).query(MediaRepository::mapFile).optional();
     }
 
@@ -90,17 +93,17 @@ public class MediaRepository {
     }
 
     public Optional<MediaFileRow> findRowByPath(String path) {
-        return db.sql("SELECT " + FILE_COLUMNS + " FROM media_files WHERE path = ?")
+        return db.sql("SELECT " + FILE_COLUMNS + FILE_FROM + " WHERE f.path = ?")
                 .param(path).query(MediaRepository::mapRow).optional();
     }
 
     public List<MediaFileRow> rowsByDirectory(long dirId) {
-        return db.sql("SELECT " + FILE_COLUMNS + " FROM media_files WHERE dir_id = ?")
+        return db.sql("SELECT " + FILE_COLUMNS + FILE_FROM + " WHERE f.dir_id = ?")
                 .param(dirId).query(MediaRepository::mapRow).list();
     }
 
     public List<MediaFileDto> filesBySubject(long subjectId) {
-        return db.sql("SELECT " + FILE_COLUMNS + " FROM media_files WHERE subject_id = ? AND match_state = 'bound' ORDER BY episode_sort")
+        return db.sql("SELECT " + FILE_COLUMNS + FILE_FROM + " WHERE f.subject_id = ? AND f.match_state = 'bound' ORDER BY f.episode_sort")
                 .param(subjectId).query(MediaRepository::mapFile).list();
     }
 
@@ -146,6 +149,12 @@ public class MediaRepository {
         db.sql("DELETE FROM media_files WHERE id = ?").param(id).update();
     }
 
+    /** v0.16 DN5：下载完成后回填来源任务 id（「来自下载任务」溯源） */
+    public void markFromTask(long id, long taskId) {
+        db.sql("UPDATE media_files SET download_task_id = ? WHERE id = ? AND download_task_id IS NULL")
+                .param(taskId).param(id).update();
+    }
+
     /* ── 行映射 ── */
 
     public record MediaFileRow(
@@ -153,7 +162,8 @@ public class MediaRepository {
             Double durationSec, String container, String vcodec, String acodec,
             Integer width, Integer height, String parsedTitle, Integer parsedEpisode,
             String matchState, Long subjectId, String subjectName, String subjectNameCn,
-            Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error) {}
+            Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error,
+            Long downloadTaskId, String downloadTaskName) {}
 
     public static MediaFileDto mapFile(java.sql.ResultSet rs, int i) throws java.sql.SQLException {
         return toDto(mapRow(rs, i));
@@ -163,7 +173,8 @@ public class MediaRepository {
         return new MediaFileDto(r.id(), r.dirId(), r.path(), r.name(), r.ext(), r.size(), r.mtime(),
                 r.durationSec(), r.container(), r.vcodec(), r.acodec(), r.width(), r.height(),
                 r.parsedTitle(), r.parsedEpisode(), r.matchState(), r.subjectId(), r.subjectName(),
-                r.subjectNameCn(), r.episodeSort(), r.autoBound(), r.matchedAt(), r.probedAt(), r.error());
+                r.subjectNameCn(), r.episodeSort(), r.autoBound(), r.matchedAt(), r.probedAt(), r.error(),
+                r.downloadTaskId(), r.downloadTaskName());
     }
 
     public static MediaFileRow mapRow(java.sql.ResultSet rs, int i) throws java.sql.SQLException {
@@ -175,6 +186,8 @@ public class MediaRepository {
         boolean probedNull = rs.wasNull();
         long subject = rs.getLong("subject_id");
         boolean subjectNull = rs.wasNull();
+        long taskId = rs.getLong("download_task_id");
+        boolean taskNull = rs.wasNull();
         return new MediaFileRow(
                 rs.getLong("id"), rs.getLong("dir_id"), rs.getString("path"), rs.getString("name"),
                 rs.getString("ext"), rs.getLong("size"), rs.getLong("mtime"),
@@ -184,15 +197,16 @@ public class MediaRepository {
                 rs.getString("match_state"), subjectNull ? null : subject,
                 rs.getString("subject_name"), rs.getString("subject_name_cn"),
                 (Integer) rs.getObject("episode_sort"), rs.getInt("auto_bound") == 1,
-                matchedNull ? null : matched, probedNull ? null : probed, rs.getString("error"));
+                matchedNull ? null : matched, probedNull ? null : probed, rs.getString("error"),
+                taskNull ? null : taskId, rs.getString("download_task_name"));
     }
 
     /* ── 过滤条件拼装 ── */
 
     private static String appendFilters(StringBuilder sql, Long dirId, String state, String q) {
-        if (dirId != null) sql.append(" AND dir_id = ?");
-        if (state != null && !state.isBlank()) sql.append(" AND match_state = ?");
-        if (q != null && !q.isBlank()) sql.append(" AND (name LIKE ? OR parsed_title LIKE ? OR subject_name LIKE ? OR subject_name_cn LIKE ?)");
+        if (dirId != null) sql.append(" AND f.dir_id = ?");
+        if (state != null && !state.isBlank()) sql.append(" AND f.match_state = ?");
+        if (q != null && !q.isBlank()) sql.append(" AND (f.name LIKE ? OR f.parsed_title LIKE ? OR f.subject_name LIKE ? OR f.subject_name_cn LIKE ?)");
         return sql.toString();
     }
 

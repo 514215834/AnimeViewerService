@@ -29,7 +29,8 @@ public final class Dtos {
             Integer width, Integer height,
             String parsedTitle, Integer parsedEpisode,
             String matchState, Long subjectId, String subjectName, String subjectNameCn,
-            Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error) {}
+            Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error,
+            Long downloadTaskId, String downloadTaskName) {}
 
     public record SubjectFileDto(
             long fileId, int sort, String name, Double durationSec, String ext, boolean direct) {}
@@ -58,4 +59,31 @@ public final class Dtos {
     public record WebdavBrowseDto(String path, List<WebdavEntryDto> list) {}
 
     public record WebdavOpenDto(String streamId) {}
+
+    /* ── v0.16 DN1/DN2 下载中心（aria2 引擎 + 任务）── */
+
+    public record DownloadFileDto(int index, String path, String name, long length,
+                                  long completedLength, boolean selected) {}
+
+    public record DownloadTaskDto(
+            long id, String gid, String infoHash, String name, String uri,
+            Long subjectId, String subjectName, String subjectNameCn, Integer episodeSort,
+            String status, long totalLength, long completedLength, long downloadSpeed, long uploadSpeed,
+            int connections, int seeds, List<DownloadFileDto> files, String error,
+            Long createdAt, Long completedAt) {}
+
+    public record DownloadAddRequest(String uri, Long subjectId, String subjectName,
+                                     String subjectNameCn, Integer episodeSort) {}
+
+    public record DownloadSelectionRequest(List<Integer> indexes) {}
+
+    public record DownloadRemoveRequest(Boolean deleteFiles) {}
+
+    public record DownloadEngineDto(boolean available, String mode, String version,
+                                    String downloadDir, String error) {}
+
+    public record DownloadSettingsDto(String enginePath, String engineUrl, String engineSecret,
+                                      Integer rpcPort, String downloadDir, Integer maxConcurrent,
+                                      String uploadLimit, List<String> trackers, boolean autoScan,
+                                      int seedTimeMinutes, boolean checkCertificate) {}
 }

@@ -41,6 +41,30 @@ av:
   webdav:
     # v0.15 WebDAV streamId 会话有效期（分钟）；凭据只随 POST 体流转，不进 URL
     session-ttl-minutes: 10
+  aria2:
+    # v0.16 下载引擎默认值（运行期可在前端设置页覆盖，存 SQLite settings 表）。
+    # PATH 探测不到且未填外部地址时下载模块整体降级：添加磁力返回引导文案 + 一键复制磁力链接。
+    # 可执行文件：托管模式从 PATH 探测；未入 PATH 时填完整路径（如 G:/aria2/aria2-1.37.0-win-64bit-build1/aria2c.exe）
+    path: aria2c
+    # 外部实例模式：填已有 aria2 的 RPC 地址（如 http://127.0.0.1:6800/rpc）后优先于托管模式；secret 为其 rpc-secret
+    external-url: ""
+    external-secret: ""
+    # 托管模式 RPC 监听端口（仅绑定回环）
+    rpc-port: 16800
+    # 下载目录（默认落在服务 data 目录下，纳入媒体库扫描即可自动入库匹配）
+    download-dir: ./data/downloads
+    # 同时活动任务上限（aria2 max-concurrent-downloads）
+    max-concurrent: 2
+    # 全局上传限速（aria2 max-overall-upload-limit 语法，如 2M；空 = 不限）
+    upload-limit: ""
+    # 注入磁力的公共 tracker（逗号分隔；磁力自带 tracker 之外追加——无 tracker 磁力依赖 DHT 极慢）
+    trackers: ""
+    # 任务完成后自动触发媒体库增量扫描（NameParser/BangumiMatcher 接管入库匹配）
+    auto-scan: true
+    # 完成后做种分钟数（0 = 下完即停；个人取资源工具默认不做种，可自行调大）
+    seed-time-minutes: 0
+    # aria2 证书校验：Windows 版 schannel 吊销检查会致 HTTPS tracker 握手失败（v0.16 原型实测），默认关闭
+    check-certificate: false
 
 logging:
   level:
