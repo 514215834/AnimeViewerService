@@ -46,4 +46,16 @@ public final class Dtos {
     public record ScanRequest(Boolean full) {}
 
     public record DirectoryRequest(String path) {}
+
+    /* ── v0.15 O3 WebDAV（凭据只随 POST 体流转，不出现在响应/URL）── */
+
+    public record WebdavBrowseRequest(String url, String username, String password, String path) {}
+
+    public record WebdavOpenRequest(String url, String username, String password) {}
+
+    public record WebdavEntryDto(String name, boolean dir, Long size, Long mtime) {}
+
+    public record WebdavBrowseDto(String path, List<WebdavEntryDto> list) {}
+
+    public record WebdavOpenDto(String streamId) {}
 }

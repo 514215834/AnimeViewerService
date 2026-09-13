@@ -4,3 +4,4 @@ testdata/
 *.log
 .idea/
 *.iml
+testdata-proxy/
