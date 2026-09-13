@@ -18,35 +18,90 @@ import java.util.Map;
 
 /** S3 Bangumi 匹配器：文件名解析结果 → v0 搜索（type=2 动画）→ 归一化比对 →
  *  高置信（归一化后全等）自动绑定，否则进入「待确认」并保存最佳候选。
- *  服务端直连无 CORS，且使用合规自定义 UA（迭代文档 §3.3-3 浏览器 UA 限制的绕开）。 */
+ *  服务端直连无 CORS，且使用合规自定义 UA（迭代文档 §3.3-3 浏览器 UA 限制的绕开）。
+ *  网络线路：proxy-mode = direct（仅直连）/ proxy（仅代理）/ auto（默认——直连失败自动经代理重试，
+ *  可用线路粘性记忆；墙内直连被重置 + 本机 Clash 的典型环境下开箱即用，无需额外启动参数）。 */
 @Component
 public class BangumiMatcher {
 
     private static final Logger log = LoggerFactory.getLogger(BangumiMatcher.class);
 
     private final ServiceProperties props;
-    private final RestClient rest;
+    private final RestClient restDirect;
+    private final RestClient restProxy;
+    private final boolean proxyOnly;
+    private final boolean autoFailover;
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, CacheEntry> searchCache = new LinkedHashMap<>();
     private long lastRequestAt = 0;
+    /** auto 模式的粘性线路记忆：true = 上次成功走的是代理 */
+    private volatile boolean useProxy = false;
 
     private record CacheEntry(List<BangumiSubjectDto> results, long at) {}
 
     public BangumiMatcher(ServiceProperties props) {
         this.props = props;
+        String mode = props.bangumi().proxyMode() == null ? "auto" : props.bangumi().proxyMode().trim().toLowerCase();
+        String host = props.bangumi().proxyHost();
+        boolean hasProxy = host != null && !host.isBlank() && props.bangumi().proxyPort() != null;
+        if ("proxy".equals(mode) && !hasProxy) {
+            log.warn("av.bangumi.proxy-mode=proxy 但未配置代理地址，退化为 auto 模式");
+            mode = "auto";
+        }
+        this.proxyOnly = "proxy".equals(mode);
+        this.autoFailover = !this.proxyOnly && !"direct".equals(mode);
+        this.restDirect = buildClient(false);
+        this.restProxy = hasProxy ? buildClient(true) : null;
+        log.info("Bangumi 线路模式: {}（代理: {}）", mode, hasProxy ? host + ":" + props.bangumi().proxyPort() : "未配置");
+    }
+
+    private RestClient buildClient(boolean viaProxy) {
         var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
-        // 可选 HTTP 代理（api.bgm.tv 直连被重置的墙内环境）
-        if (props.bangumi().proxyHost() != null && !props.bangumi().proxyHost().isBlank()
-                && props.bangumi().proxyPort() != null) {
+        if (viaProxy) {
             factory.setProxy(new java.net.Proxy(java.net.Proxy.Type.HTTP,
                     new java.net.InetSocketAddress(props.bangumi().proxyHost(), props.bangumi().proxyPort())));
         }
-        this.rest = RestClient.builder()
+        return RestClient.builder()
                 .baseUrl(props.bangumi().baseUrl())
                 .requestFactory(factory)
                 .defaultHeader("User-Agent", props.bangumi().userAgent())
                 .defaultHeader("Accept", "application/json")
                 .build();
+    }
+
+    /** 统一请求执行：auto 模式下连接级失败（ResourceAccessException）自动切换线路重试一次，成功线路粘性记忆 */
+    private String exchange(java.util.function.Function<RestClient, String> call) {
+        if (!autoFailover) {
+            return call.apply(proxyOnly ? restProxy : restDirect);
+        }
+        boolean tryProxy = useProxy;
+        org.springframework.web.client.ResourceAccessException lastError = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            RestClient client = tryProxy ? restProxy : restDirect;
+            if (client == null) {
+                tryProxy = !tryProxy;
+                continue;
+            }
+            try {
+                String result = call.apply(client);
+                useProxy = tryProxy;
+                return result;
+            } catch (org.springframework.web.client.ResourceAccessException e) {
+                lastError = e;
+                log.warn("Bangumi {}失败（{}），切换为{}重试",
+                        tryProxy ? "经代理请求" : "直连请求",
+                        rootMessage(e),
+                        tryProxy ? "直连" : "经代理");
+                tryProxy = !tryProxy;
+            }
+        }
+        throw lastError;
+    }
+
+    private static String rootMessage(Throwable e) {
+        Throwable cur = e;
+        while (cur.getCause() != null && cur.getCause() != cur) cur = cur.getCause();
+        return cur.getMessage() == null ? e.getMessage() : cur.getMessage();
     }
 
     /** 对单个文件执行匹配：返回落库用的结果 */
@@ -98,12 +153,12 @@ public class BangumiMatcher {
                     "keyword", keyword,
                     "limit", 8,
                     "filter", Map.of("type", List.of(2))));
-            String resp = rest.post()
+            String resp = exchange(client -> client.post()
                     .uri("/v0/search/subjects")
                     .header("Content-Type", "application/json")
                     .body(body)
                     .retrieve()
-                    .body(String.class);
+                    .body(String.class));
             List<BangumiSubjectDto> list = new ArrayList<>();
             JsonNode root = mapper.readTree(resp);
             for (JsonNode item : root.path("data")) {
@@ -133,7 +188,9 @@ public class BangumiMatcher {
     public BangumiSubjectDto subject(long subjectId) {
         throttle();
         try {
-            String resp = rest.get().uri("/v0/subjects/{id}", subjectId).retrieve().body(String.class);
+            String resp = exchange(client -> client.get()
+                    .uri("/v0/subjects/{id}", subjectId)
+                    .retrieve().body(String.class));
             JsonNode item = mapper.readTree(resp);
             return new BangumiSubjectDto(
                     item.path("id").asLong(),
@@ -151,10 +208,10 @@ public class BangumiMatcher {
     public List<BangumiEpisodeDto> episodes(long subjectId) {
         throttle();
         try {
-            String resp = rest.get()
+            String resp = exchange(client -> client.get()
                     .uri(uri -> uri.path("/v0/episodes").queryParam("subject_id", subjectId)
                             .queryParam("limit", 1000).build())
-                    .retrieve().body(String.class);
+                    .retrieve().body(String.class));
             List<BangumiEpisodeDto> list = new ArrayList<>();
             JsonNode root = mapper.readTree(resp);
             for (JsonNode item : root.path("data")) {

@@ -13,7 +13,7 @@ public record ServiceProperties(
         Remux remux
 ) {
     public record Bangumi(String baseUrl, String userAgent, long matchThrottleMs,
-                          String proxyHost, Integer proxyPort) {}
+                          String proxyHost, Integer proxyPort, String proxyMode) {}
 
     public record Scan(boolean autoOnStart, int probeTimeoutSeconds) {}
 
@@ -23,7 +23,7 @@ public record ServiceProperties(
         if (dataDir == null || dataDir.isBlank()) dataDir = "./data";
         if (ffmpegPath == null || ffmpegPath.isBlank()) ffmpegPath = "ffmpeg";
         if (ffprobePath == null || ffprobePath.isBlank()) ffprobePath = "ffprobe";
-        if (bangumi == null) bangumi = new Bangumi("https://api.bgm.tv", "AnimeViewerService/0.14", 400, "", null);
+        if (bangumi == null) bangumi = new Bangumi("https://api.bgm.tv", "AnimeViewerService/0.14", 400, "127.0.0.1", 7897, "auto");
         if (scan == null) scan = new Scan(true, 30);
         if (remux == null) remux = new Remux(3);
     }

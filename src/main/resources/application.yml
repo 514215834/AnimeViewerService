@@ -20,8 +20,10 @@ av:
     # 服务端自定义合规 UA（官方 API 要求可识别的 User-Agent）
     user-agent: "AnimeViewerService/${project.version} (personal media server; https://github.com/jinfenglong/AnimeViewer)"
     match-throttle-ms: 400
-    # 可选 HTTP 代理（api.bgm.tv 直连被重置的环境下填代理地址，如本机 Clash：127.0.0.1:7897）
-    proxy-host: ""
+    # 网络线路：auto（默认，直连失败自动经代理重试并粘性记忆）/ direct（仅直连）/ proxy（仅代理）
+    proxy-mode: auto
+    # 代理地址（auto 容灾与 proxy 模式使用；默认 Clash Verge 混合端口 7897，按实际修改）
+    proxy-host: 127.0.0.1
     proxy-port: 7897
   scan:
     # 启动时自动执行 mtime 增量扫描

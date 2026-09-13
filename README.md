@@ -50,7 +50,8 @@ java -jar target/animeviewer-service-0.14.0.jar
 | `--server.address` | `127.0.0.1` | **局域网观看**（手机/平板）改为 `0.0.0.0`（配合 Token 鉴权使用） |
 | `--av.data-dir` | `./data` | 数据目录（token / media.db） |
 | `--av.ffmpeg-path` / `--av.ffprobe-path` | `ffmpeg` / `ffprobe` | 可执行文件路径（未入 PATH 时填完整路径） |
-| `--av.bangumi.proxy-host` / `--av.bangumi.proxy-port` | 空 | api.bgm.tv 直连被重置的墙内环境填 HTTP 代理（如本机 Clash `127.0.0.1:7897`） |
+| `--av.bangumi.proxy-mode` | `auto` | 网络线路：`auto`=直连失败自动经代理重试并粘性记忆可用线路（默认，墙内开箱即用）；`direct`=仅直连；`proxy`=仅代理 |
+| `--av.bangumi.proxy-host` / `--av.bangumi.proxy-port` | `127.0.0.1` / `7897` | 代理地址（auto 容灾与 proxy 模式使用；默认 Clash Verge 混合端口，按实际修改） |
 | `--av.scan.auto-on-start` | `true` | 启动时自动增量扫描 |
 | `--av.remux.max-concurrent` | `3` | 转封装进程并发上限 |
 
