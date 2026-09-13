@@ -86,4 +86,19 @@ public final class Dtos {
                                       Integer rpcPort, String downloadDir, Integer maxConcurrent,
                                       String uploadLimit, List<String> trackers, boolean autoScan,
                                       int seedTimeMinutes, boolean checkCertificate) {}
+
+    /* ── v0.17 R1/R2 资源发现（RSS 站点源 + 条目找资源）── */
+
+    public record ResourceItemDto(String title, String magnet, String infoHash, String site,
+                                  String size, String category, String publisher, Long pubDate,
+                                  String link) {}
+
+    public record ResourceSiteDto(String key, String name, String baseUrl, String searchTemplate,
+                                  boolean builtin) {}
+
+    public record ResourceSearchDto(String keyword, List<ResourceItemDto> items,
+                                    List<ResourceSiteDto> sites, String error) {}
+
+    public record ResourceAddRequest(String magnet, Long subjectId, String subjectName,
+                                     String subjectNameCn, Integer episodeSort) {}
 }

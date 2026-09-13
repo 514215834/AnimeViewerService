@@ -13,9 +13,9 @@
 
   <groupId>com.animeviewer</groupId>
   <artifactId>animeviewer-service</artifactId>
-  <version>0.16.0</version>
+  <version>0.17.0</version>
   <name>AnimeViewerService</name>
-  <description>AnimeViewer 本地媒体服务（v0.16）：媒体库扫描 / Bangumi 匹配 / 流式播放 / 流代理 / WebDAV / BT 下载（aria2）</description>
+  <description>AnimeViewer 本地媒体服务（v0.17）：媒体库扫描 / Bangumi 匹配 / 流式播放 / 流代理 / WebDAV / BT 下载（aria2）</description>
 
   <properties>
     <java.version>21</java.version>

@@ -30,12 +30,17 @@ public class Aria2Client {
 
     private final String rpcUrl;
     private final String secret;
-    private final HttpClient http;
 
     public Aria2Client(String rpcUrl, String secret) {
         this.rpcUrl = rpcUrl;
         this.secret = secret == null ? "" : secret;
-        this.http = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+    }
+
+    /** 每次调用独立 HttpClient（RPC 低频，1.5s 一次 watcher）：引擎重启后旧 keep-alive 连接半死时，
+     *  复用池化连接会在连接获取阶段无限等待（request timeout 不覆盖该阶段），且 synchronized call
+     *  会串死所有下载端点（v0.17 验收实测）——不复用即根治。 */
+    private HttpClient client() {
+        return HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
     }
 
     private synchronized JsonNode call(String method, Object... params) {
@@ -48,7 +53,7 @@ public class Aria2Client {
                     .timeout(TIMEOUT)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build();
-            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> res = client().send(req, HttpResponse.BodyHandlers.ofString());
             JsonNode root = MAPPER.readTree(res.body());
             JsonNode err = root.get("error");
             if (err != null) {
