@@ -196,6 +196,19 @@ public class Aria2Engine {
         }
     }
 
+    /** v0.18 QB3：切换到 qBt 引擎时停止托管 aria2 子进程（外部实例模式无需处理） */
+    public synchronized void stopManagedIfAny() {
+        if (process != null && process.isAlive()) {
+            process.destroyForcibly();
+        }
+        if (client != null) {
+            try { client.shutdown(); } catch (Exception ignored) { }
+        }
+        process = null;
+        client = null;
+        clientMode = "";
+    }
+
     private DownloadSettings currentSettings() {
         return DownloadSettings.load(repo.getSetting(DownloadSettings.STORE_KEY).orElse(null),
                 DownloadSettings.defaults(props));

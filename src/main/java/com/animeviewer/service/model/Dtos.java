@@ -82,8 +82,10 @@ public final class Dtos {
     public record DownloadEngineDto(boolean available, String mode, String version,
                                     String downloadDir, String error) {}
 
-    public record DownloadSettingsDto(String enginePath, String engineUrl, String engineSecret,
-                                      Integer rpcPort, String downloadDir, Integer maxConcurrent,
+    /** v0.18：engineType=aria2-managed/aria2-external/qbittorrent；qbPath 仅直开模式消费 */
+    public record DownloadSettingsDto(String engineType, String enginePath, String engineUrl, String engineSecret,
+                                      Integer rpcPort, String qbPath,
+                                      String downloadDir, Integer maxConcurrent,
                                       String uploadLimit, List<String> trackers, boolean autoScan,
                                       int seedTimeMinutes, boolean checkCertificate) {}
 

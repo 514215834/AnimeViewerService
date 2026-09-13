@@ -2,6 +2,7 @@ package com.animeviewer.service.download;
 
 import com.animeviewer.service.ServiceProperties;
 import com.animeviewer.service.media.LibraryScanner;
+import com.animeviewer.service.download.DownloadEngine.TaskSnapshot;
 import com.animeviewer.service.model.Dtos.DownloadAddRequest;
 import com.animeviewer.service.model.Dtos.DownloadEngineDto;
 import com.animeviewer.service.model.Dtos.DownloadFileDto;
@@ -19,20 +20,21 @@ import org.springframework.stereotype.Service;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
 
 /**
- * v0.16 DN1/DN2/DN5 下载编排：入队（磁力合并 tracker → addUri）、watcher 轮询（1.5s，引擎→DB 单向同步）、
+ * v0.16 DN1/DN2/DN5 下载编排：入队（磁力合并 tracker → 引擎入队）、watcher 轮询（1.5s，aria2→DB 单向同步）、
  * 控制（暂停/恢复/文件勾选/删除）、完成闭环（触发增量扫描 → 等待扫描结束 → 预绑定 + 来源任务回填）。
  *
  * 原型实测的两个关键行为已在此消化：
  * ① 磁力元数据完成后 aria2 为负载生成新 gid（原 gid 标记 complete）——按 infoHash 收养后继 gid；
  * ② gid 不存在（引擎重启清空列表）→ 以原始 uri 重新入队恢复（recover_count 上限 3，防循环）。
+ *
+ * v0.18 引擎抽象：经 DownloadEngineRouter 分派 aria2（托管/外部实例）与 qBittorrent 外部应用直开——
+ * 直开任务入队即拉起外部应用（无 RPC），状态定格 external，不参与 watcher 同步，
+ * 暂停/恢复/文件勾选被拒绝并提示到 qBittorrent 中操作。
  */
 @Service
 public class DownloadService {
@@ -44,7 +46,9 @@ public class DownloadService {
     private static final int ADOPTION_MAX_MISS = 6;
 
     private final DownloadRepository repo;
-    private final Aria2Engine engine;
+    private final Aria2Engine aria2Engine;
+    private final Aria2Adapter aria2;
+    private final DownloadEngineRouter router;
     private final MediaRepository mediaRepo;
     private final LibraryScanner scanner;
     private final ServiceProperties props;
@@ -53,13 +57,21 @@ public class DownloadService {
     private java.util.concurrent.ExecutorService completionExecutor;
     private volatile boolean running = true;
 
-    public DownloadService(DownloadRepository repo, Aria2Engine engine, MediaRepository mediaRepo,
+    public DownloadService(DownloadRepository repo, Aria2Engine aria2Engine, Aria2Adapter aria2,
+                           DownloadEngineRouter router, MediaRepository mediaRepo,
                            LibraryScanner scanner, ServiceProperties props) {
         this.repo = repo;
-        this.engine = engine;
+        this.aria2Engine = aria2Engine;
+        this.aria2 = aria2;
+        this.router = router;
         this.mediaRepo = mediaRepo;
         this.scanner = scanner;
         this.props = props;
+    }
+
+    /** 任务控制/同步所属引擎（按当前设置） */
+    private DownloadEngine engineFor(DownloadRepository.TaskRow t) {
+        return router.current(currentSettings());
     }
 
     @PostConstruct
@@ -93,7 +105,15 @@ public class DownloadService {
     }
 
     public DownloadEngineDto engineInfo() {
-        Aria2Engine.EngineInfo info = engine.ensureRunning();
+        DownloadEngine engine = router.current(currentSettings());
+        DownloadEngine.EngineInfo info = engine.ensureRunning();
+        return new DownloadEngineDto(info.available(), info.mode(), info.version(), info.downloadDir(), info.error());
+    }
+
+    /** 设置页「重启引擎/重试连接」：按当前引擎类型分派 */
+    public DownloadEngineDto restartEngine() {
+        DownloadEngine engine = router.current(currentSettings());
+        DownloadEngine.EngineInfo info = engine.restart();
         return new DownloadEngineDto(info.available(), info.mode(), info.version(), info.downloadDir(), info.error());
     }
 
@@ -104,11 +124,12 @@ public class DownloadService {
         if (!MagnetParser.isSupported(uri)) {
             throw new DownloadException(400, "仅支持磁力链接（magnet:?xt=urn:btih:...）或 http(s)/ftp 直链");
         }
-        Aria2Engine.EngineInfo info = engine.ensureRunning();
+        DownloadSettings settings = currentSettings();
+        DownloadEngine engine = router.current(settings);
+        DownloadEngine.EngineInfo info = engine.ensureRunning();
         if (!info.available()) {
             throw new DownloadException(503, "下载引擎不可用：" + info.error());
         }
-        Aria2Client client = engine.client();
         MagnetParser.MagnetInfo magnet = MagnetParser.parse(uri);
         if (magnet.infoHash() != null) {
             repo.findByInfohash(magnet.infoHash()).ifPresent(t -> {
@@ -119,100 +140,103 @@ public class DownloadService {
                 throw new DownloadException(409, "该链接已在任务列表（任务 #" + t.id() + " " + statusLabel(t.status()) + "）");
             });
         }
-        // 原型结论：无 tracker 磁力依赖 DHT，元数据解析极慢——配置 tracker 全部注入
-        String gid;
+        // 原型结论：无 tracker 磁力依赖 DHT，元数据解析极慢——配置 tracker 全部注入磁力 uri
+        String taskKey;
         String displayName = magnet.displayName();
         if (magnet.infoHash() == null && isTorrentLink(uri)) {
-            // .torrent 直链：服务端抓取种子内容走 addTorrent（文件清单立即可知，无二段 gid）
+            // .torrent 直链：服务端抓取种子内容入队（文件清单立即可知，无二段 gid）
             byte[] torrent = fetchTorrent(uri);
-            try {
-                gid = client.addTorrent(java.util.Base64.getEncoder().encodeToString(torrent),
-                        List.of(), Map.of("dir", info.downloadDir()));
-            } catch (Aria2Client.Aria2Exception e) {
-                throw new DownloadException(502, "引擎拒绝任务: " + e.getMessage());
-            }
+            taskKey = enqueueTorrent(engine, torrent, null, info.downloadDir());
             displayName = null;
         } else {
-            String finalUri = MagnetParser.mergeTrackers(uri, currentSettings().trackers());
+            String finalUri = MagnetParser.mergeTrackers(uri, settings.trackers());
             try {
-                gid = client.addUri(List.of(finalUri), Map.of("dir", info.downloadDir()));
-            } catch (Aria2Client.Aria2Exception e) {
+                taskKey = engine.enqueue(finalUri, magnet.infoHash(), info.downloadDir());
+            } catch (DownloadException e) {
+                throw e;
+            } catch (Exception e) {
                 throw new DownloadException(502, "引擎拒绝任务: " + e.getMessage());
             }
         }
+        boolean externalHandoff = engine instanceof ExternalAppAdapter;
         long id = repo.insert(new DownloadRepository.TaskRow(
-                0, gid, magnet.infoHash(), displayName, uri,
+                0, taskKey, magnet.infoHash(), displayName, uri,
                 req.subjectId(), req.subjectName(), req.subjectNameCn(), req.episodeSort(),
-                "queued", 0, 0, 0, 0, 0, 0, null, null, 0, false,
+                externalHandoff ? "external" : "queued", 0, 0, 0, 0, 0, 0, null, null, 0, false,
                 System.currentTimeMillis(), null));
-        log.info("下载任务 #{} 已入队（gid={}, uri={}…）", id, gid, uri.substring(0, Math.min(60, uri.length())));
+        log.info("下载任务 #{} {}（key={}, uri={}…）", id,
+                externalHandoff ? "已拉起 qBittorrent 下载" : "已入队",
+                taskKey, uri.substring(0, Math.min(60, uri.length())));
         return get(id);
+    }
+
+    /** .torrent 内容入队：aria2 走 addTorrent；直开=暂存临时种子文件后拉起 */
+    private String enqueueTorrent(DownloadEngine engine, byte[] torrent, String infoHash, String downloadDir) {
+        if (engine instanceof Aria2Adapter a) {
+            return a.enqueueTorrent(torrent, infoHash, downloadDir);
+        }
+        if (engine instanceof ExternalAppAdapter e) {
+            return e.enqueueTorrent(torrent, infoHash, downloadDir);
+        }
+        throw new DownloadException(502, "未知引擎类型");
     }
 
     /* ── 控制 ── */
 
     public void pause(long id) {
-        Aria2Client client = requireClient();
-        DownloadRepository.TaskRow t = requireNonTerminal(id);
+        DownloadRepository.TaskRow t = requireControllable(id);
         try {
-            client.forcePause(t.gid());
-        } catch (Aria2Client.GidNotFoundException e) {
-            throw new DownloadException(409, "引擎中无此任务（可能已结束），等待状态同步");
-        } catch (Aria2Client.Aria2Exception e) {
+            engineFor(t).pause(t.gid());
+        } catch (DownloadException e) {
+            throw e;
+        } catch (Exception e) {
             throw new DownloadException(502, "暂停失败: " + e.getMessage());
         }
         repo.updateRuntime(id, "paused", t.totalLen(), t.completedLen(), 0, 0, 0, 0, t.filesJson(), null, null);
     }
 
     public void resume(long id) {
-        Aria2Client client = requireClient();
-        DownloadRepository.TaskRow t = requireNonTerminal(id);
+        DownloadRepository.TaskRow t = requireControllable(id);
         try {
-            client.unpause(t.gid());
-        } catch (Aria2Client.GidNotFoundException e) {
-            throw new DownloadException(409, "引擎中无此任务（可能已结束），等待状态同步");
-        } catch (Aria2Client.Aria2Exception e) {
+            engineFor(t).resume(t.gid());
+        } catch (DownloadException e) {
+            throw e;
+        } catch (Exception e) {
             throw new DownloadException(502, "恢复失败: " + e.getMessage());
         }
     }
 
-    /** 文件勾选（select-file）：active 任务先暂停→改选项→恢复（原型验证 changeOption 暂停态可写） */
+    /** 文件勾选（aria2=select-file） */
     public void applySelection(long id, DownloadSelectionRequest req) {
-        Aria2Client client = requireClient();
-        DownloadRepository.TaskRow t = requireNonTerminal(id);
+        DownloadRepository.TaskRow t = requireControllable(id);
         List<DownloadFileDto> files = parseFiles(t.filesJson());
         if (files.isEmpty()) throw new DownloadException(400, "文件清单尚未就绪（元数据解析中）");
-        String indexes = (req == null ? List.<Integer>of() : req.indexes()).stream()
+        List<Integer> indexes = (req == null ? List.<Integer>of() : req.indexes()).stream()
                 .filter(x -> x != null && x >= 1)
-                .map(String::valueOf)
                 .distinct()
-                .collect(Collectors.joining(","));
+                .toList();
         if (indexes.isEmpty()) throw new DownloadException(400, "至少选择一个文件");
-        boolean wasRunning = "downloading".equals(t.status()) || "queued".equals(t.status()) || "metadata".equals(t.status());
         try {
-            if (wasRunning) client.forcePause(t.gid());
-            client.changeOption(t.gid(), Map.of("select-file", indexes, "bt-remove-unselected-file", "true"));
-            if (wasRunning) client.unpause(t.gid());
-            Map<String, Object> st = client.tellStatus(t.gid(), List.of("files"));
-            saveFiles(t.id(), filesOf(st));
-        } catch (Aria2Client.Aria2Exception e) {
+            engineFor(t).applySelection(t.gid(), indexes);
+            // 勾选状态由 aria2 tellStatus 下一轮 watcher 回读
+        } catch (DownloadException e) {
+            throw e;
+        } catch (Exception e) {
             throw new DownloadException(502, "应用文件选择失败: " + e.getMessage());
         }
     }
 
     public void remove(long id, boolean deleteFiles) {
         DownloadRepository.TaskRow t = repo.find(id).orElseThrow(() -> new DownloadException(404, "任务不存在"));
-        Aria2Client client = engine.client();
         List<DownloadFileDto> files = parseFiles(t.filesJson());
-        if (client != null && t.gid() != null) {
-            try {
-                client.forceRemove(t.gid());
-                client.purgeDownloadResult();
-            } catch (Exception ignored) {
-                // 引擎侧可能已无此任务
-            }
+        boolean aria2Engine = engineFor(t) instanceof Aria2Adapter;
+        try {
+            // aria2 引擎侧移除（文件由服务端删）；直开台账删除（文件由 qBittorrent 管理）
+            engineFor(t).remove(t.gid(), !aria2Engine && deleteFiles);
+        } catch (Exception e) {
+            log.warn("任务 #{} 引擎侧删除失败（继续清理记录）: {}", id, e.toString());
         }
-        if (deleteFiles && !files.isEmpty()) {
+        if (deleteFiles && aria2Engine && !files.isEmpty()) {
             String root = Path.of(currentSettings().downloadDir()).toAbsolutePath().normalize().toString();
             for (DownloadFileDto f : files) {
                 try {
@@ -245,17 +269,22 @@ public class DownloadService {
 
     public DownloadSettingsDto updateSettings(DownloadSettingsDto dto) {
         DownloadSettings merged = new DownloadSettings(
-                dto.enginePath(), dto.engineUrl(), dto.engineSecret(), dto.rpcPort(),
+                dto.engineType(), dto.enginePath(), dto.engineUrl(), dto.engineSecret(), dto.rpcPort(),
+                dto.qbPath(),
                 dto.downloadDir(), dto.maxConcurrent(), dto.uploadLimit(), dto.trackers(),
                 dto.autoScan(), dto.seedTimeMinutes(), dto.checkCertificate());
         String err = merged.validate();
         if (err != null) throw new DownloadException(400, err);
         repo.putSetting(DownloadSettings.STORE_KEY, merged.toJson());
-        engine.restart();
+        // 当前引擎重启；切换引擎类型时另一引擎的子进程也停止（aria2 托管进程不再需要时销毁）
+        router.current(merged).restart();
+        if (!merged.aria2Managed()) {
+            aria2Engine.stopManagedIfAny();
+        }
         return getSettings();
     }
 
-    /* ── watcher（引擎 → DB 单向同步 + 收养 + 恢复 + 完成闭环） ── */
+    /* ── watcher（aria2 引擎 → DB 单向同步 + 收养 + 恢复 + 完成闭环；直开任务不进入） ── */
 
     private void watchLoop() {
         while (running) {
@@ -274,99 +303,99 @@ public class DownloadService {
     }
 
     private void pollOnce() {
-        Aria2Engine.EngineInfo info = engine.ensureRunning();
+        DownloadSettings settings = currentSettings();
+        DownloadEngine engine = router.current(settings);
         List<DownloadRepository.TaskRow> tasks = repo.listNonTerminal();
-        if (tasks.isEmpty()) return;
+        // 直开模式无 RPC 可同步；旧 aria2 任务在直开模式下也保持原状（引擎切换不自动接管）
+        if (tasks.isEmpty() || engine instanceof ExternalAppAdapter) return;
+        DownloadEngine.EngineInfo info = engine.ensureRunning();
         if (!info.available()) return; // 引擎不可用：保持现状，恢复后自动续传（engine info 已带原因）
-        Aria2Client client = engine.client();
+
         for (DownloadRepository.TaskRow t : tasks) {
             try {
-                syncTask(client, t);
-            } catch (Aria2Client.GidNotFoundException e) {
-                recoverTask(client, t);
-            } catch (Aria2Client.Aria2Exception e) {
-                log.warn("任务 #{} 状态同步失败: {}", t.id(), e.getMessage());
+                TaskSnapshot snap = aria2.status(t.gid());
+                syncFromSnapshot(t, snap, settings);
+            } catch (DownloadException e) {
+                if (e.status == 409) {
+                    recoverTask(t, settings);
+                } else {
+                    log.warn("任务 #{} 状态同步失败: {}", t.id(), e.getMessage());
+                }
+            } catch (Exception e) {
+                log.warn("任务 #{} 状态同步失败: {}", t.id(), e.toString());
             }
         }
     }
 
-    private void syncTask(Aria2Client client, DownloadRepository.TaskRow t) {
-        Map<String, Object> st = client.tellStatus(t.gid(), List.of(
-                "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed",
-                "connections", "numSeeds", "numSeeders", "bittorrent", "errorMessage", "files", "infoHash"));
-        String engineStatus = Aria2Client.asString(st, "status");
-        List<DownloadFileDto> files = filesOf(st);
+    /** 统一快照落库（aria2 原生状态 → 统一状态映射） */
+    private void syncFromSnapshot(DownloadRepository.TaskRow t, TaskSnapshot snap, DownloadSettings settings) {
+        List<DownloadFileDto> files = snap.files();
         boolean filesKnown = DownloadStates.filesKnown(files.isEmpty() ? List.of() : List.of(files.get(0).path()));
-        String infoHash = Aria2Client.asString(st, "infoHash");
-        String btName = btName(st);
 
         // 原型结论 ②：磁力元数据完成后负载是“新 gid”——按 infoHash 收养
-        if ("complete".equals(engineStatus) && !filesKnown) {
-            String successor = findSuccessor(client, t);
-            if (successor != null) {
-                log.info("任务 #{} 元数据完成，收养后继 gid {} → {}", t.id(), t.gid(), successor);
-                repo.updateGid(t.id(), successor, t.recoverCount());
-                syncTask(client, repo.find(t.id()).orElse(t));
-                return;
-            }
-            int misses = t.recoverCount() + 1;
-            if (misses > ADOPTION_MAX_MISS) {
-                repo.updateRuntime(t.id(), "error", t.totalLen(), t.completedLen(), 0, 0, 0, 0,
-                        t.filesJson(), null, "元数据解析完成后未找到负载任务");
-                return;
-            }
-            repo.updateGid(t.id(), t.gid(), misses);
+        if ("complete".equals(snap.engineStatus()) && !filesKnown) {
+            adoptOrMark(t, snap, settings);
             return;
         }
-
-        String newStatus = DownloadStates.mapTaskStatus(engineStatus, filesKnown);
+        String newStatus = DownloadStates.mapTaskStatus(snap.engineStatus(), filesKnown);
         String filesJson = files.isEmpty() ? t.filesJson() : toJson(files);
-        repo.updateRuntime(t.id(), newStatus,
-                Aria2Client.asLong(st, "totalLength"), Aria2Client.asLong(st, "completedLength"),
-                Aria2Client.asLong(st, "downloadSpeed"), Aria2Client.asLong(st, "uploadSpeed"),
-                (int) Aria2Client.asLong(st, "connections"),
-                (int) Math.max(Aria2Client.asLong(st, "numSeeds"), Aria2Client.asLong(st, "numSeeders")),
-                filesJson, btName,
-                "error".equals(engineStatus) ? Aria2Client.asString(st, "errorMessage") : null);
-        // addTorrent 任务的 infoHash 在文件已知后回填（供后续 infohash 去重）
-        if (filesKnown && t.infoHash() == null && infoHash != null && !infoHash.isBlank()) {
-            repo.updateInfohash(t.id(), infoHash.toLowerCase(Locale.ROOT));
+        repo.updateRuntime(t.id(), newStatus, snap.totalLength(), snap.completedLength(),
+                snap.downloadSpeed(), snap.uploadSpeed(), snap.connections(), snap.seeds(),
+                filesJson, snap.btName(), snap.errorMessage());
+        if (filesKnown && t.infoHash() == null && snap.infoHash() != null && !snap.infoHash().isBlank()) {
+            repo.updateInfohash(t.id(), snap.infoHash().toLowerCase(Locale.ROOT));
         }
-
         if ("completed".equals(newStatus) && !t.postprocessed()) {
             handleCompletion(repo.find(t.id()).orElse(t));
         }
     }
 
+    /** aria2 元数据收养：active/waiting 列表找同 infoHash 后继 gid（v0.16 逻辑） */
+    private void adoptOrMark(DownloadRepository.TaskRow t, TaskSnapshot snap, DownloadSettings settings) {
+        String successor = findSuccessor(t);
+        if (successor != null) {
+            log.info("任务 #{} 元数据完成，收养后继 gid {} → {}", t.id(), t.gid(), successor);
+            repo.updateGid(t.id(), successor, t.recoverCount());
+            return;
+        }
+        int misses = t.recoverCount() + 1;
+        if (misses > ADOPTION_MAX_MISS) {
+            repo.updateRuntime(t.id(), "error", t.totalLen(), t.completedLen(), 0, 0, 0, 0,
+                    t.filesJson(), null, "元数据解析完成后未找到负载任务");
+            return;
+        }
+        repo.updateGid(t.id(), t.gid(), misses);
+    }
+
     /** 在引擎 active/waiting 列表中找同 infoHash 的后继负载任务 */
-    private String findSuccessor(Aria2Client client, DownloadRepository.TaskRow t) {
+    private String findSuccessor(DownloadRepository.TaskRow t) {
         if (t.infoHash() == null) return null;
-        List<String> keys = List.of("gid", "infoHash", "status");
-        List<Map<String, Object>> candidates = new ArrayList<>(client.tellList("aria2.tellActive", keys));
-        candidates.addAll(client.tellPaged("aria2.tellWaiting", 0, 50, keys));
-        for (Map<String, Object> c : candidates) {
-            String ih = Aria2Client.asString(c, "infoHash");
-            String gid = Aria2Client.asString(c, "gid");
-            if (ih != null && gid != null && ih.equalsIgnoreCase(t.infoHash()) && !gid.equals(t.gid())) {
-                return gid;
+        try {
+            for (String gid : aria2.activeTaskKeys()) {
+                TaskSnapshot s = aria2.status(gid);
+                if (s.infoHash() != null && s.infoHash().equalsIgnoreCase(t.infoHash()) && !gid.equals(t.gid())) {
+                    return gid;
+                }
             }
+        } catch (Exception e) {
+            log.warn("任务 #{} 收养探测失败: {}", t.id(), e.toString());
         }
         return null;
     }
 
     /** 引擎重启/ gid 失效 → 以原始 uri 重新入队（上限 MAX_RECOVER 防循环） */
-    private void recoverTask(Aria2Client client, DownloadRepository.TaskRow t) {
+    private void recoverTask(DownloadRepository.TaskRow t, DownloadSettings settings) {
         if (t.recoverCount() >= MAX_RECOVER) {
             repo.updateRuntime(t.id(), "error", t.totalLen(), t.completedLen(), 0, 0, 0, 0,
                     t.filesJson(), null, "引擎中任务丢失且重试次数已达上限，请手动重新添加");
             return;
         }
         try {
-            String finalUri = MagnetParser.mergeTrackers(t.uri(), currentSettings().trackers());
-            String gid = client.addUri(List.of(finalUri), Map.of("dir", engine.downloadDir()));
+            String finalUri = MagnetParser.mergeTrackers(t.uri(), settings.trackers());
+            String gid = aria2.enqueue(finalUri, t.infoHash(), aria2Engine.downloadDir());
             repo.updateGid(t.id(), gid, t.recoverCount() + 1);
             log.info("任务 #{} 引擎任务丢失，已重新入队（新 gid={}，第 {} 次）", t.id(), gid, t.recoverCount() + 1);
-        } catch (Aria2Client.Aria2Exception e) {
+        } catch (Exception e) {
             log.warn("任务 #{} 恢复失败: {}", t.id(), e.getMessage());
         }
     }
@@ -383,7 +412,7 @@ public class DownloadService {
         completionExecutor.submit(() -> {
             try {
                 // 下载目录自动纳入媒体库（幂等）：未注册时补登记，扫描器才会走该目录
-                String dir = engine.downloadDir();
+                String dir = Path.of(currentSettings().downloadDir()).toAbsolutePath().normalize().toString();
                 if (dir != null && mediaRepo.findDirectoryByPath(dir).isEmpty()) {
                     mediaRepo.insertDirectory(dir);
                     log.info("下载目录已自动纳入媒体库扫描: {}", dir);
@@ -407,7 +436,7 @@ public class DownloadService {
                         if (t.subjectId() != null) {
                             MediaFileRow row = mediaRepo.findRowByPath(path).orElse(null);
                             if (row != null && !"bound".equals(row.matchState())) {
-                                // 整季包按文件名解析集数（NameParser）；解析不出才落到任务级 episodeSort
+                                // 整季包按文件名解析集数（NameParser）；解析不出才落到任务级集数
                                 int sort = row.parsedEpisode() != null ? row.parsedEpisode()
                                         : t.episodeSort() != null ? t.episodeSort() : 0;
                                 if (sort > 0) {
@@ -472,14 +501,12 @@ public class DownloadService {
         }
     }
 
-    private Aria2Client requireClient() {
-        Aria2Engine.EngineInfo info = engine.ensureRunning();
-        if (!info.available()) throw new DownloadException(503, "下载引擎不可用：" + info.error());
-        return engine.client();
-    }
-
-    private DownloadRepository.TaskRow requireNonTerminal(long id) {
+    /** 暂停/恢复/文件勾选要求任务可被引擎操控：直开台账任务拒绝并给出操作指引 */
+    private DownloadRepository.TaskRow requireControllable(long id) {
         DownloadRepository.TaskRow t = repo.find(id).orElseThrow(() -> new DownloadException(404, "任务不存在"));
+        if ("external".equals(t.status())) {
+            throw new DownloadException(400, "已交给 qBittorrent 直开下载——请在 qBittorrent 中操作（此处仅任务台账）");
+        }
         if (!DownloadStates.NON_TERMINAL.contains(t.status())) {
             throw new DownloadException(409, "任务已结束（" + statusLabel(t.status()) + "）");
         }
@@ -489,42 +516,6 @@ public class DownloadService {
     private DownloadSettings currentSettings() {
         return DownloadSettings.load(repo.getSetting(DownloadSettings.STORE_KEY).orElse(null),
                 DownloadSettings.defaults(props));
-    }
-
-    private static String btName(Map<String, Object> st) {
-        Object bt = st.get("bittorrent");
-        if (bt instanceof Map<?, ?> m) {
-            Object info = m.get("info");
-            if (info instanceof Map<?, ?> im) {
-                Object name = im.get("name");
-                if (name != null) return String.valueOf(name);
-            }
-        }
-        return null;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> rawFiles(Map<String, Object> st) {
-        Object files = st.get("files");
-        return files instanceof List ? (List<Map<String, Object>>) files : List.of();
-    }
-
-    private static List<DownloadFileDto> filesOf(Map<String, Object> st) {
-        return rawFiles(st).stream()
-                .map(f -> new DownloadFileDto(
-                        (int) Aria2Client.asLong(f, "index"),
-                        Aria2Client.asString(f, "path"),
-                        fileName(Aria2Client.asString(f, "path")),
-                        Aria2Client.asLong(f, "length"),
-                        Aria2Client.asLong(f, "completedLength"),
-                        Aria2Client.asLong(f, "selected") == 1))
-                .toList();
-    }
-
-    private static String fileName(String path) {
-        if (path == null) return "";
-        int i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-        return i < 0 ? path : path.substring(i + 1);
     }
 
     private void saveFiles(long id, List<DownloadFileDto> files) {
@@ -558,7 +549,8 @@ public class DownloadService {
     }
 
     private DownloadSettingsDto toSettingsDto(DownloadSettings s) {
-        return new DownloadSettingsDto(s.enginePath(), s.engineUrl(), s.engineSecret(), s.rpcPort(),
+        return new DownloadSettingsDto(s.engineType(), s.enginePath(), s.engineUrl(), s.engineSecret(), s.rpcPort(),
+                s.qbPath(),
                 s.downloadDir(), s.maxConcurrent(), s.uploadLimit(), s.trackers(), s.autoScan(),
                 s.seedTimeMinutes(), s.checkCertificate());
     }
@@ -569,6 +561,7 @@ public class DownloadService {
             case "metadata" -> "解析元数据";
             case "downloading" -> "下载中";
             case "paused" -> "已暂停";
+            case "external" -> "已交给下载器";
             case "completed" -> "已完成";
             case "error" -> "失败";
             default -> status;

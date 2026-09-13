@@ -1,6 +1,6 @@
 package com.animeviewer.service.api;
 
-import com.animeviewer.service.download.Aria2Engine;
+import com.animeviewer.service.download.DownloadEngine;
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadService;
 import com.animeviewer.service.model.Dtos.DownloadAddRequest;
@@ -21,17 +21,16 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
-/** v0.16 DN1/DN3 下载中心 API：任务列表/入队/详情/控制/文件勾选/删除 + 引擎状态与设置。 */
+/** v0.16 DN1/DN3 下载中心 API：任务列表/入队/详情/控制/文件勾选/删除 + 引擎状态与设置。
+ *  v0.18 QB1：引擎操作经 DownloadService 内部路由（aria2/qBittorrent），控制器不再感知具体引擎。 */
 @RestController
 @RequestMapping("/api/downloads")
 public class DownloadController {
 
     private final DownloadService service;
-    private final Aria2Engine engine;
 
-    public DownloadController(DownloadService service, Aria2Engine engine) {
+    public DownloadController(DownloadService service) {
         this.service = service;
-        this.engine = engine;
     }
 
     @GetMapping
@@ -82,8 +81,7 @@ public class DownloadController {
 
     @PostMapping("/engine/restart")
     public Object restart() {
-        Aria2Engine.EngineInfo info = engine.restart();
-        return info;
+        return service.restartEngine();
     }
 
     @GetMapping("/settings")
