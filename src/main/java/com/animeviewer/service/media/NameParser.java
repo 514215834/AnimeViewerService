@@ -133,9 +133,15 @@ public final class NameParser {
         return title.isBlank() ? null : new ParsedName(title, ep);
     }
 
+    private static final Pattern GROUP_TAG_UPPER = Pattern.compile("[A-Z]{2,10}");
+
     private static boolean isNoiseToken(String t) {
         String lower = t.toLowerCase(Locale.ROOT);
-        return NOISE.matcher(lower).find() || lower.contains("kissaten") || lower.contains("sub");
+        // 全大写短词多为字幕组/发布组尾标（JPSC、VCB、NC…）
+        if (t.length() >= 2 && t.length() <= 10 && GROUP_TAG_UPPER.matcher(t).matches()) return true;
+        return NOISE.matcher(lower).find()
+                || lower.contains("kissaten") || lower.contains("sub")
+                || t.contains("字幕组") || t.contains("字幕") || t.contains("汉化") || t.contains("搬運") || t.contains("搬运");
     }
 
     /** 标题清洗：去括号块 / 噪声词 / 分隔符边缘 */

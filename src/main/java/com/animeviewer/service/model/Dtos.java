@@ -16,7 +16,8 @@ public final class Dtos {
 
     public record ScanStatus(
             boolean running, String phase, long scanned, long added, long updated, long removed,
-            long matched, long failed, String currentPath, Long startedAt, Long finishedAt, String lastError) {}
+            long matched, long failed, String currentPath, Long startedAt, Long finishedAt, String lastError,
+            long matchTotal, long matchDone) {}
 
     public record DirectoryDto(long id, String path, boolean enabled, long fileCount, Long createdAt) {}
 

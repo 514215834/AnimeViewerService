@@ -156,7 +156,10 @@ public class MediaRepository {
             Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error) {}
 
     public static MediaFileDto mapFile(java.sql.ResultSet rs, int i) throws java.sql.SQLException {
-        MediaFileRow r = mapRow(rs, i);
+        return toDto(mapRow(rs, i));
+    }
+
+    public static MediaFileDto toDto(MediaFileRow r) {
         return new MediaFileDto(r.id(), r.dirId(), r.path(), r.name(), r.ext(), r.size(), r.mtime(),
                 r.durationSec(), r.container(), r.vcodec(), r.acodec(), r.width(), r.height(),
                 r.parsedTitle(), r.parsedEpisode(), r.matchState(), r.subjectId(), r.subjectName(),

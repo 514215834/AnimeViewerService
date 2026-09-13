@@ -1,6 +1,8 @@
 package com.animeviewer.service.media;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.model.Dtos.MatchOutcome;
+import com.animeviewer.service.model.Dtos.MediaFileDto;
 import com.animeviewer.service.model.Dtos.ScanStatus;
 import com.animeviewer.service.store.MediaRepository;
 import com.animeviewer.service.store.MediaRepository.MediaFileRow;
@@ -15,14 +17,18 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 /** S2 媒体库扫描：目录递归扫描（视频扩展名过滤）→ ffprobe 探测 → SQLite upsert；
- *  mtime+size 增量（未变化跳过探测）；消失文件移除；扫描完成后对未绑定文件执行 Bangumi 匹配。
- *  单线程执行（同一时刻至多一次扫描），异步触发立即返回 202。 */
+ *  mtime+size 增量（未变化跳过探测）；消失文件移除；扫描完成后对「本轮新增/更新 + 未识别」文件执行 Bangumi 匹配
+ *  （待确认 pending 为人工终态，不自动重搜）。单线程执行（同一时刻至多一次扫描），异步触发立即返回。
+ *  扫描/匹配两阶段进度全程写入 ScanStatus（含匹配阶段 matchTotal/matchDone 与正在匹配的文件名）。 */
 @Component
 @Order(2)
 public class LibraryScanner implements ApplicationRunner {
@@ -40,8 +46,9 @@ public class LibraryScanner implements ApplicationRunner {
     private final ExternalTool externalTool;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
-    // 扫描状态（volatile 字段组合读；单写线程更新）
     private volatile ScanStatus status = idleStatus();
+    /** 本轮新增/更新的文件绝对路径（仅扫描线程访问，startAsync 的 AtomicBoolean 保证无并发扫描） */
+    private final Set<String> touchedPaths = new HashSet<>();
 
     public LibraryScanner(ServiceProperties props, MediaRepository repo, FfprobeService ffprobe,
                           BangumiMatcher matcher, ExternalTool externalTool) {
@@ -53,7 +60,7 @@ public class LibraryScanner implements ApplicationRunner {
     }
 
     private static ScanStatus idleStatus() {
-        return new ScanStatus(false, "idle", 0, 0, 0, 0, 0, 0, null, null, null, null);
+        return new ScanStatus(false, "idle", 0, 0, 0, 0, 0, 0, null, null, null, null, 0, 0);
     }
 
     public ScanStatus status() {
@@ -79,12 +86,15 @@ public class LibraryScanner implements ApplicationRunner {
                 scanAll(full);
             } catch (Exception e) {
                 log.error("扫描异常", e);
-                status = withError(e.getMessage());
+                withError(e.getMessage());
             } finally {
                 running.set(false);
-                ScanStatus cur = status;
-                status = new ScanStatus(false, "done", cur.scanned(), cur.added(), cur.updated(), cur.removed(),
-                        cur.matched(), cur.failed(), null, cur.startedAt(), System.currentTimeMillis(), cur.lastError());
+                synchronized (this) {
+                    ScanStatus cur = status;
+                    status = new ScanStatus(false, "done", cur.scanned(), cur.added(), cur.updated(), cur.removed(),
+                            cur.matched(), cur.failed(), null, cur.startedAt(), System.currentTimeMillis(),
+                            cur.lastError(), cur.matchTotal(), cur.matchDone());
+                }
             }
         }, "library-scan");
         t.setDaemon(true);
@@ -92,14 +102,18 @@ public class LibraryScanner implements ApplicationRunner {
         return true;
     }
 
-    private ScanStatus withError(String msg) {
-        ScanStatus cur = status;
-        return new ScanStatus(false, "error", cur.scanned(), cur.added(), cur.updated(), cur.removed(),
-                cur.matched(), cur.failed(), null, cur.startedAt(), System.currentTimeMillis(), msg);
+    private void withError(String msg) {
+        synchronized (this) {
+            ScanStatus cur = status;
+            status = copy(cur, "error", null, cur.startedAt(), System.currentTimeMillis(), msg);
+        }
     }
 
     private void scanAll(boolean full) {
-        status = new ScanStatus(true, "scanning", 0, 0, 0, 0, 0, 0, null, System.currentTimeMillis(), null, null);
+        synchronized (this) {
+            status = new ScanStatus(true, "scanning", 0, 0, 0, 0, 0, 0, null, System.currentTimeMillis(), null, null, 0, 0);
+        }
+        touchedPaths.clear();
         boolean canProbe = externalTool.ffprobeAvailable();
 
         for (var dir : repo.listDirectories()) {
@@ -120,7 +134,7 @@ public class LibraryScanner implements ApplicationRunner {
             for (MediaFileRow row : repo.rowsByDirectory(dir.id())) {
                 if (!Files.isRegularFile(Path.of(row.path()))) {
                     repo.deleteFile(row.id());
-                    bump(b -> b.removed++);
+                    bump(c -> c.removed++);
                 }
             }
         }
@@ -173,34 +187,53 @@ public class LibraryScanner implements ApplicationRunner {
 
             boolean isNew = existing.isEmpty();
             repo.upsertScannedFile(dirId, row);
-            bump(b -> {
-                b.scanned++;
-                if (isNew) b.added++;
-                else b.updated++;
+            touchedPaths.add(absPath);
+            bump(c -> {
+                c.scanned++;
+                if (isNew) c.added++;
+                else c.updated++;
             });
-            status = withPhase("scanning", file.toAbsolutePath().toString());
+            withPhase("scanning", absPath);
         } catch (IOException e) {
             log.warn("文件处理失败: {} ({})", file, e.toString());
-            bump(b -> b.failed++);
+            bump(c -> c.failed++);
         }
     }
 
-    /** 扫描后匹配：仅处理非 bound 且有解析标题的文件（匹配只依赖网络与文件名，与 ffmpeg 无关） */
+    /** 扫描后匹配（范围收窄，2026-09-13 评审采纳）：仅「本轮新增/更新的文件」+「全部未识别（unmatched）」；
+     *  待确认（pending）为人工终态不自动重搜——单文件「匹配」按钮 / 改绑仍可手动触发 */
     private void matchUnbound() {
-        status = withPhase("matching", null);
-        var pending = repo.listFiles(null, null, null, 100000, 0);
-        for (var f : pending) {
-            if ("bound".equals(f.matchState())) continue;
-            if (f.parsedTitle() == null || f.parsedTitle().isBlank()) continue;
-            var outcome = matcher.match(f.parsedTitle(), f.parsedEpisode());
+        withPhase("matching", null);
+        Map<Long, MediaFileDto> todo = new LinkedHashMap<>();
+        for (String path : touchedPaths) {
+            repo.findRowByPath(path).ifPresent(r -> {
+                if (!"bound".equals(r.matchState()) && hasTitle(r.parsedTitle())) {
+                    todo.putIfAbsent(r.id(), MediaRepository.toDto(r));
+                }
+            });
+        }
+        for (MediaFileDto f : repo.listFiles(null, "unmatched", null, 100000, 0)) {
+            if (hasTitle(f.parsedTitle())) todo.putIfAbsent(f.id(), f);
+        }
+
+        bump(c -> c.matchTotal = todo.size());
+        for (MediaFileDto f : todo.values()) {
+            withPhase("matching", f.name());
+            MatchOutcome outcome = matcher.match(f.parsedTitle(), f.parsedEpisode());
             applyMatch(f.id(), outcome, f.parsedEpisode());
-            bump(b -> {
-                if ("bound".equals(outcome.state())) b.matched++;
+            boolean bound = "bound".equals(outcome.state());
+            bump(c -> {
+                c.matchDone++;
+                if (bound) c.matched++;
             });
         }
     }
 
-    public void applyMatch(long fileId, com.animeviewer.service.model.Dtos.MatchOutcome outcome, Integer parsedEpisode) {
+    private static boolean hasTitle(String title) {
+        return title != null && !title.isBlank();
+    }
+
+    public void applyMatch(long fileId, MatchOutcome outcome, Integer parsedEpisode) {
         switch (outcome.state()) {
             case "bound" -> repo.updateMatch(fileId, "bound", outcome.subjectId(), outcome.subjectName(),
                     outcome.subjectNameCn(), parsedEpisode, outcome.exact());
@@ -210,34 +243,50 @@ public class LibraryScanner implements ApplicationRunner {
         }
     }
 
+    /* ── 状态机（单写线程 + synchronized 读改写；前端每 2s 轮询只读） ── */
+
+    private static ScanStatus copy(ScanStatus s, String phase, String currentPath,
+                                   Long startedAt, Long finishedAt, String lastError) {
+        return new ScanStatus(s.running(), phase, s.scanned(), s.added(), s.updated(), s.removed(),
+                s.matched(), s.failed(), currentPath, startedAt, finishedAt, lastError,
+                s.matchTotal(), s.matchDone());
+    }
+
     private void bump(java.util.function.Consumer<Counter> c) {
         synchronized (this) {
-            ScanStatus s = status;
-            Counter ctr = new Counter(s.scanned(), s.added(), s.updated(), s.removed(), s.matched(), s.failed());
+            Counter ctr = new Counter(status);
             c.accept(ctr);
-            status = new ScanStatus(s.running(), s.phase(), ctr.scanned, ctr.added, ctr.updated, ctr.removed,
-                    ctr.matched, ctr.failed, s.currentPath(), s.startedAt(), s.finishedAt(), s.lastError());
+            status = ctr.toStatus(status);
         }
     }
 
-    private ScanStatus withPhase(String phase, String currentPath) {
+    private void withPhase(String phase, String currentPath) {
         synchronized (this) {
             ScanStatus s = status;
-            return new ScanStatus(s.running(), phase, s.scanned(), s.added(), s.updated(), s.removed(),
-                    s.matched(), s.failed(), currentPath, s.startedAt(), s.finishedAt(), s.lastError());
+            status = new ScanStatus(s.running(), phase, s.scanned(), s.added(), s.updated(), s.removed(),
+                    s.matched(), s.failed(), currentPath, s.startedAt(), s.finishedAt(), s.lastError(),
+                    s.matchTotal(), s.matchDone());
         }
     }
 
     private static final class Counter {
-        long scanned, added, updated, removed, matched, failed;
+        long scanned, added, updated, removed, matched, failed, matchTotal, matchDone;
 
-        Counter(long scanned, long added, long updated, long removed, long matched, long failed) {
-            this.scanned = scanned;
-            this.added = added;
-            this.updated = updated;
-            this.removed = removed;
-            this.matched = matched;
-            this.failed = failed;
+        Counter(ScanStatus s) {
+            this.scanned = s.scanned();
+            this.added = s.added();
+            this.updated = s.updated();
+            this.removed = s.removed();
+            this.matched = s.matched();
+            this.failed = s.failed();
+            this.matchTotal = s.matchTotal();
+            this.matchDone = s.matchDone();
+        }
+
+        ScanStatus toStatus(ScanStatus s) {
+            return new ScanStatus(s.running(), s.phase(), scanned, added, updated, removed,
+                    matched, failed, s.currentPath(), s.startedAt(), s.finishedAt(), s.lastError(),
+                    matchTotal, matchDone);
         }
     }
 
