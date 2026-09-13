@@ -56,7 +56,12 @@ public class Aria2Client {
                 if (msg.contains("is not found") || msg.contains("Cannot be removed")) throw new GidNotFoundException(msg);
                 throw new Aria2Exception("aria2 " + method + " 失败: " + msg);
             }
-            return root.get("result");
+            JsonNode result = root.get("result");
+            if (result == null || result.isMissingNode()) {
+                // 非 JSON-RPC 响应（如错误页 / RPC 路径不对）——给出可诊断的失败而非 NPE
+                throw new Aria2Exception("aria2 " + method + " 响应缺少 result（请检查 RPC 地址与路径）");
+            }
+            return result;
         } catch (Aria2Exception e) {
             throw e;
         } catch (Exception e) {

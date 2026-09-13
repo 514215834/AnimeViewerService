@@ -209,9 +209,15 @@ public class Aria2Engine {
         }
     }
 
-    static String normalizeRpcUrl(String url) {
+    /**
+     * RPC 地址归一化：aria2 仅服务 /jsonrpc。用户习惯写法 http://host:6800/rpc → 替换尾段为
+     * /jsonrpc；已带 /jsonrpc 原样；裸地址（scheme://host[:port]）追加 /jsonrpc。
+     */
+    public static String normalizeRpcUrl(String url) {
         String u = url.trim().replaceAll("/+$", "");
-        return u.endsWith("/jsonrpc") ? u : u + "/jsonrpc";
+        if (u.endsWith("/jsonrpc")) return u;
+        if (u.endsWith("/rpc")) return u.substring(0, u.length() - 4) + "/jsonrpc";
+        return u + "/jsonrpc";
     }
 
     /** PATH / 指定路径可执行文件版本探测（对齐 ExternalTool 的 ffmpeg 探测模式）；null = 不可用 */
