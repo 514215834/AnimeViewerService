@@ -68,6 +68,18 @@ public class DownloadRepository {
                 .query(DownloadRepository::mapRow).list();
     }
 
+    /** v0.19 SU1 订阅过滤：条目已下载/已入队过的最大集数（任何状态的任务都算——完成后不应重复下载同集） */
+    public int maxEpisodeForSubject(long subjectId) {
+        return db.sql("SELECT COALESCE(MAX(episode_sort), 0) FROM download_tasks WHERE subject_id = ?")
+                .param(subjectId).query(Integer.class).optional().orElse(0);
+    }
+
+    /** v0.19 SU3 通知：最近一个完成任务（completed_at 降序第一条） */
+    public Optional<TaskRow> latestCompleted() {
+        return db.sql("SELECT " + COLUMNS + " FROM download_tasks WHERE status = 'completed' AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1")
+                .query(DownloadRepository::mapRow).optional();
+    }
+
     public List<TaskRow> listAll(int limit) {
         return db.sql("SELECT " + COLUMNS + " FROM download_tasks ORDER BY id DESC LIMIT ?")
                 .param(limit).query(DownloadRepository::mapRow).list();

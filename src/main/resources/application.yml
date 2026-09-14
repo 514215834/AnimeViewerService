@@ -65,6 +65,18 @@ av:
     seed-time-minutes: 0
     # aria2 证书校验：Windows 版 schannel 吊销检查会致 HTTPS tracker 握手失败（v0.16 原型实测），默认关闭
     check-certificate: false
+  subscription:
+    # v0.19 SU1 订阅自动化默认值（运行期可在前端设置页覆盖，存 SQLite settings 表）
+    # 定时检索间隔（分钟，30~360；订阅命中入待确认队列，全自动为条目级显式开关）
+    interval-minutes: 60
+    # 资源大小下限（MB，0 = 不限）——滤掉体积异常小的广告/垃圾条目
+    min-size-mb: 0
+    # 全自动保护 I：每日自动入队上限（超出降级待确认人工把关）
+    auto-daily-limit: 5
+    # 全自动保护 II：单任务大小上限（MB，0 = 不限）
+    auto-max-size-mb: 0
+    # 全自动保护 III：仅已匹配条目（媒体库无绑定文件的全自动命中降级待确认）
+    auto-only-matched: true
 
 logging:
   level:

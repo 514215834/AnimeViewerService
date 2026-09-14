@@ -113,6 +113,44 @@ public class DbConfig {
                       key TEXT PRIMARY KEY,
                       value TEXT NOT NULL
                     )""");
+            // v0.19 SU1 订阅自动化：条目级订阅（一 subject 一行；min_episode=观看进度基线，
+            // 过滤阈值=max(min_episode, 已下载最大集)；auto=全自动入队（默认待确认）
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS subscriptions(
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      subject_id INTEGER NOT NULL UNIQUE,
+                      subject_name TEXT,
+                      subject_name_cn TEXT,
+                      auto INTEGER NOT NULL DEFAULT 0,
+                      min_episode INTEGER NOT NULL DEFAULT 0,
+                      ignored_fansubs TEXT NOT NULL DEFAULT '[]',
+                      last_checked_at INTEGER,
+                      last_hit_at INTEGER,
+                      created_at INTEGER NOT NULL
+                    )""");
+            // v0.19 SU2 命中台账（待确认队列与历史共用）：status=pending/enqueued/ignored/auto；
+            // 同一资源 infohash 永不重复出现（入队去重由 download_tasks infohash 把关）
+            st.execute("""
+                    CREATE TABLE IF NOT EXISTS sub_hits(
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      subject_id INTEGER NOT NULL,
+                      subject_name TEXT,
+                      subject_name_cn TEXT,
+                      episode_sort INTEGER,
+                      title TEXT NOT NULL,
+                      fansub TEXT,
+                      magnet TEXT NOT NULL,
+                      infohash TEXT,
+                      site TEXT,
+                      size TEXT,
+                      pub_date INTEGER,
+                      status TEXT NOT NULL DEFAULT 'pending',
+                      note TEXT,
+                      created_at INTEGER NOT NULL,
+                      decided_at INTEGER
+                    )""");
+            st.execute("CREATE INDEX IF NOT EXISTS idx_sub_hits_status ON sub_hits(status)");
+            st.execute("CREATE INDEX IF NOT EXISTS idx_sub_hits_subject ON sub_hits(subject_id, episode_sort)");
         }
         return ds;
     }

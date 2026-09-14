@@ -103,4 +103,31 @@ public final class Dtos {
 
     public record ResourceAddRequest(String magnet, Long subjectId, String subjectName,
                                      String subjectNameCn, Integer episodeSort) {}
+
+    /* ── v0.19 SU1/SU2/SU3 订阅自动化（条目级订阅 + 命中审核 + 通知汇总）── */
+
+    public record SubscriptionDto(long id, long subjectId, String subjectName, String subjectNameCn,
+                                  boolean auto, int minEpisode, List<String> ignoredFansubs,
+                                  Long lastCheckedAt, Long lastHitAt, long createdAt) {}
+
+    public record SubscriptionAddRequest(Long subjectId, String subjectName, String subjectNameCn,
+                                         Integer minEpisode, Boolean auto) {}
+
+    /** 可选字段 PATCH 语义：null = 不改 */
+    public record SubscriptionUpdateRequest(Boolean auto, Integer minEpisode) {}
+
+    public record SubHitDto(long id, long subjectId, String subjectName, String subjectNameCn,
+                            Integer episodeSort, String title, String fansub, String magnet, String infoHash,
+                            String site, String size, Long pubDate, String status, String note,
+                            Long createdAt, Long decidedAt) {}
+
+    public record HitIgnoreRequest(Boolean blockFansub) {}
+
+    public record SubscriptionSettingsDto(int intervalMinutes, int minSizeMb, int autoDailyLimit,
+                                          int autoMaxSizeMb, boolean autoOnlyMatched) {}
+
+    /** SU3 通知汇总（前端 60s 轮询）：待确认数 → 侧边栏角标；lastHit/lastCompleted 新于上次所见 → toast */
+    public record DownloadSummaryDto(long pendingHits, long activeTasks, SubHitDto lastHit, TaskBrief lastCompleted) {}
+
+    public record TaskBrief(long id, String name, String subjectName, String subjectNameCn, Long completedAt) {}
 }

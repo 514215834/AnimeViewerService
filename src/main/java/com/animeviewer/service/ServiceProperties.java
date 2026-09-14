@@ -15,7 +15,8 @@ public record ServiceProperties(
         Remux remux,
         Proxy proxy,
         Webdav webdav,
-        Aria2 aria2
+        Aria2 aria2,
+        Subscription subscription
 ) {
     public record Bangumi(String baseUrl, String userAgent, long matchThrottleMs,
                           String proxyHost, Integer proxyPort, String proxyMode) {}
@@ -41,6 +42,15 @@ public record ServiceProperties(
                         List<String> trackers, boolean autoScan, Integer seedTimeMinutes,
                         boolean checkCertificate) {}
 
+    /**
+     * v0.19 SU1 订阅自动化 yml 默认值——运行期可经 /api/subscriptions/settings 覆盖（存 SQLite）。
+     * intervalMinutes 定时检索间隔（30~360 分钟）；minSizeMb 资源大小下限滤广告（0 = 不限）；
+     * 全自动三重保护：autoDailyLimit 每日自动入队上限 / autoMaxSizeMb 单任务大小上限（0 = 不限）/
+     * autoOnlyMatched 仅已匹配条目（媒体库无绑定文件的全自动命中降级待确认）。
+     */
+    public record Subscription(Integer intervalMinutes, Integer minSizeMb, Integer autoDailyLimit,
+                               Integer autoMaxSizeMb, boolean autoOnlyMatched) {}
+
     public ServiceProperties {
         if (dataDir == null || dataDir.isBlank()) dataDir = "./data";
         if (ffmpegPath == null || ffmpegPath.isBlank()) ffmpegPath = "ffmpeg";
@@ -52,5 +62,6 @@ public record ServiceProperties(
         if (webdav == null) webdav = new Webdav(10);
         if (aria2 == null) aria2 = new Aria2("aria2c", "", "", 16800, "./data/downloads", 2, "",
                 List.of(), true, 0, false);
+        if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true);
     }
 }

@@ -107,6 +107,18 @@ public class MediaRepository {
                 .param(subjectId).query(MediaRepository::mapFile).list();
     }
 
+    /** v0.19 SU1 订阅过滤：条目已入库文件的最大集数（含非任务来源的本地文件——已有文件的集不应重复下载） */
+    public int maxEpisodeForSubject(long subjectId) {
+        return db.sql("SELECT COALESCE(MAX(episode_sort), 0) FROM media_files WHERE subject_id = ? AND episode_sort IS NOT NULL")
+                .param(subjectId).query(Integer.class).optional().orElse(0);
+    }
+
+    /** v0.19 全自动保护 III：条目是否已在媒体库匹配绑定（无绑定文件的全自动命中降级待确认） */
+    public boolean hasBoundFile(long subjectId) {
+        return db.sql("SELECT COUNT(*) FROM media_files WHERE subject_id = ? AND match_state = 'bound'")
+                .param(subjectId).query(Long.class).optional().orElse(0L) > 0;
+    }
+
     /** 扫描 upsert：新文件插入，已有文件按 path 更新媒体信息与解析结果（match 绑定信息保留） */
     public void upsertScannedFile(long dirId, MediaFileRow row) {
         db.sql("""
