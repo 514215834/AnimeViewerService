@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -348,6 +349,46 @@ public class SubscriptionService {
                 }
             });
         }
+    }
+
+    /** v0.19 批量忽略（多选/全选取消）：仅处理仍处于待确认的命中，已处理/不存在的跳过 */
+    public Map<String, Long> batchIgnore(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) throw new DownloadException(400, "未选择任何命中");
+        long ignored = 0;
+        long skipped = 0;
+        for (Long id : ids.stream().distinct().toList()) {
+            Optional<SubscriptionRepository.HitRow> h = id == null ? Optional.empty() : repo.findHit(id);
+            if (h.isEmpty() || !"pending".equals(h.get().status())) {
+                skipped++;
+                continue;
+            }
+            repo.setHitStatus(id, "ignored", null);
+            ignored++;
+        }
+        return Map.of("ignored", ignored, "skipped", skipped);
+    }
+
+    /** v0.19 命中历史批量删除（多选）：仅允许删除已处理命中，待确认/不存在的跳过——审核队列不可从这里绕过 */
+    public Map<String, Long> batchDeleteHits(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) throw new DownloadException(400, "未选择任何命中");
+        long deleted = 0;
+        long skipped = 0;
+        for (Long id : ids.stream().distinct().toList()) {
+            Optional<SubscriptionRepository.HitRow> h = id == null ? Optional.empty() : repo.findHit(id);
+            if (h.isEmpty() || "pending".equals(h.get().status())) {
+                skipped++;
+                continue;
+            }
+            repo.deleteHit(id);
+            deleted++;
+        }
+        return Map.of("deleted", deleted, "skipped", skipped);
+    }
+
+    /** v0.19 清空命中历史：删除全部非待确认命中，返回删除条数。
+     *  副作用提示：sub_hits 同时承担跨轮 infohash 去重记忆，清空后同一资源再次发布仍会重新生成命中。 */
+    public long clearHitHistory() {
+        return repo.deleteNonPendingHits();
     }
 
     /* ── SU3 通知汇总 ── */

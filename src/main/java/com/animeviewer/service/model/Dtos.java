@@ -123,6 +123,10 @@ public final class Dtos {
 
     public record HitIgnoreRequest(Boolean blockFansub) {}
 
+    public record HitBatchIgnoreRequest(List<Long> ids) {}
+
+    public record HitBatchDeleteRequest(List<Long> ids) {}
+
     public record SubscriptionSettingsDto(int intervalMinutes, int minSizeMb, int autoDailyLimit,
                                           int autoMaxSizeMb, boolean autoOnlyMatched) {}
 

@@ -2,6 +2,8 @@ package com.animeviewer.service.api;
 
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.model.Dtos.DownloadTaskDto;
+import com.animeviewer.service.model.Dtos.HitBatchDeleteRequest;
+import com.animeviewer.service.model.Dtos.HitBatchIgnoreRequest;
 import com.animeviewer.service.model.Dtos.HitIgnoreRequest;
 import com.animeviewer.service.model.Dtos.SubHitDto;
 import com.animeviewer.service.model.Dtos.SubscriptionAddRequest;
@@ -80,6 +82,24 @@ public class SubscriptionController {
     public Map<String, String> ignore(@PathVariable long id, @RequestBody(required = false) HitIgnoreRequest req) {
         service.ignore(id, req == null ? null : req.blockFansub());
         return Map.of("message", "已忽略");
+    }
+
+    /** 批量忽略（多选/全选取消）：返回 { ignored, skipped }（skipped=不存在或已处理的条数） */
+    @PostMapping("/api/subscriptions/hits/batch-ignore")
+    public Map<String, Long> batchIgnore(@RequestBody(required = false) HitBatchIgnoreRequest req) {
+        return service.batchIgnore(req == null ? null : req.ids());
+    }
+
+    /** 批量删除命中历史（多选）：仅删除已处理命中，待确认跳过；返回 { deleted, skipped } */
+    @PostMapping("/api/subscriptions/hits/batch-delete")
+    public Map<String, Long> batchDelete(@RequestBody(required = false) HitBatchDeleteRequest req) {
+        return service.batchDeleteHits(req == null ? null : req.ids());
+    }
+
+    /** 清空命中历史（全部非待确认命中）：返回 { deleted } */
+    @PostMapping("/api/subscriptions/hits/clear-history")
+    public Map<String, Long> clearHistory() {
+        return Map.of("deleted", service.clearHitHistory());
     }
 
     @GetMapping("/api/subscriptions/settings")

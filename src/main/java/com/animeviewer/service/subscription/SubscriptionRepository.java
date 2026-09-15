@@ -158,6 +158,16 @@ public class SubscriptionRepository {
                 .param(status).param(note).param(System.currentTimeMillis()).param(id).update();
     }
 
+    /** 删除单条命中（命中历史多选/清空用）；返回实际删除行数 */
+    public int deleteHit(long id) {
+        return db.sql("DELETE FROM sub_hits WHERE id = ?").param(id).update();
+    }
+
+    /** 清空命中历史：删除全部非待确认命中；待确认命中必须先经人工审核，不在清理范围 */
+    public int deleteNonPendingHits() {
+        return db.sql("DELETE FROM sub_hits WHERE status != 'pending'").update();
+    }
+
     /** 跨轮去重 I：该资源历史命中过（任何状态）→ 不再生成新命中 */
     public boolean existsInfohash(String infohash) {
         return db.sql("SELECT COUNT(*) FROM sub_hits WHERE infohash = ?").param(infohash)
