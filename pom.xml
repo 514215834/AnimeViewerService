@@ -13,7 +13,7 @@
 
   <groupId>com.animeviewer</groupId>
   <artifactId>animeviewer-service</artifactId>
-  <version>0.19.0</version>
+  <version>0.20.0</version>
   <name>AnimeViewerService</name>
   <description>AnimeViewer 本地媒体服务（v0.19）：媒体库扫描 / Bangumi 匹配 / 流式播放 / 流代理 / WebDAV / BT 下载（aria2 / qBittorrent 直开）/ 订阅自动化</description>
 

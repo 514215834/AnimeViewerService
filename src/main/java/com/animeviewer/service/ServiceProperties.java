@@ -47,9 +47,12 @@ public record ServiceProperties(
      * intervalMinutes 定时检索间隔（30~360 分钟）；minSizeMb 资源大小下限滤广告（0 = 不限）；
      * 全自动三重保护：autoDailyLimit 每日自动入队上限 / autoMaxSizeMb 单任务大小上限（0 = 不限）/
      * autoOnlyMatched 仅已匹配条目（媒体库无绑定文件的全自动命中降级待确认）。
+     * v0.20：defaultAutoScore 新订阅匹配度阈值默认值（0=全手动特殊值）；globalFansubs 全局字幕组偏好
+     * （逗号分隔，评分加权 SU5）；skipEnqueuedEpisode 已入队同集忽略开关（SU6，null=默认开）。
      */
     public record Subscription(Integer intervalMinutes, Integer minSizeMb, Integer autoDailyLimit,
-                               Integer autoMaxSizeMb, boolean autoOnlyMatched) {}
+                               Integer autoMaxSizeMb, boolean autoOnlyMatched, Integer defaultAutoScore,
+                               String globalFansubs, Boolean skipEnqueuedEpisode) {}
 
     public ServiceProperties {
         if (dataDir == null || dataDir.isBlank()) dataDir = "./data";
@@ -62,6 +65,6 @@ public record ServiceProperties(
         if (webdav == null) webdav = new Webdav(10);
         if (aria2 == null) aria2 = new Aria2("aria2c", "", "", 16800, "./data/downloads", 2, "",
                 List.of(), true, 0, false);
-        if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true);
+        if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true, 0, "", null);
     }
 }

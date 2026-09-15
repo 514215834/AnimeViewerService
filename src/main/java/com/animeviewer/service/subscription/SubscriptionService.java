@@ -1,6 +1,7 @@
 package com.animeviewer.service.subscription;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.download.DownloadCompletedEvent;
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadRepository;
 import com.animeviewer.service.download.DownloadService;
@@ -19,6 +20,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -36,7 +38,8 @@ import java.util.concurrent.Executors;
 /**
  * v0.19 SU1 订阅自动化（Sonarr-lite）：条目级「自动追下载」订阅 → 定时检索（间隔 30~360 分钟可配）
  * → R2 关键词策略（中文名/原名双查询合并）→ 过滤（集数 > max(观看基线, 已下载最大集)、infohash 跨轮去重、
- * 大小下限滤广告、忽略字幕组）→ 命中入待确认队列（默认）或全自动入队（条目级显式开关 + 三重保护）。
+ * 大小下限滤广告、忽略字幕组）→ 命中评分落库（v0.20 SU4 MatchScore）→ 入待确认队列（默认）
+ * 或评分达标自动入队（订阅级阈值 auto_score>0 且 score≥阈值 + 三重保护；v0.20 阈值取代二值 auto 开关）。
  *
  * SU2：命中即台账（sub_hits），一键下载 / 忽略 / 忽略字幕组在此收口；SU3：summary() 供前端
  * 60s 轮询驱动侧边栏角标与 toast（lastHit/lastCompleted 新于上次所见即通知）。
@@ -126,10 +129,13 @@ public class SubscriptionService {
         return repo.listSubs().stream().map(SubscriptionService::toDto).toList();
     }
 
-    /** 订阅（幂等）：已存在则刷新名称并复活；返回是否新建。首次检索异步执行（RSS 抓取数秒，不阻塞请求） */
+    /** 订阅（幂等）：已存在则刷新名称并复活；返回是否新建。首次检索异步执行（RSS 抓取数秒，不阻塞请求）。
+     *  v0.20：autoScore 匹配度阈值取代二值全自动开关（0=全手动默认，1~100=评分达标自动入队） */
     public SubscriptionDto subscribe(long subjectId, String subjectName, String subjectNameCn,
-                                     Integer minEpisode, Boolean auto) {
+                                     Integer minEpisode, Integer autoScore) {
         if (subjectId <= 0) throw new DownloadException(400, "subjectId 不合法");
+        // v0.20 SU4：未显式传阈值时取全局默认（设置页「新订阅匹配度阈值」；默认 0=全手动）
+        int score = autoScore == null ? currentSettings().defaultAutoScore() : clampScore(autoScore);
         Optional<SubscriptionRepository.SubRow> existing = repo.findSubBySubject(subjectId);
         long id;
         if (existing.isPresent()) {
@@ -137,23 +143,28 @@ public class SubscriptionService {
             repo.updateSubNames(id, subjectName, subjectNameCn);
         } else {
             id = repo.insertSub(subjectId, subjectName, subjectNameCn,
-                    Boolean.TRUE.equals(auto), minEpisode == null ? 0 : Math.max(0, minEpisode));
+                    score > 0, minEpisode == null ? 0 : Math.max(0, minEpisode), score);
         }
         SubscriptionRepository.SubRow sub = repo.findSub(id).orElseThrow();
         checkExecutor.submit(() -> runCheck(sub, currentSettings()));
         return toDto(sub);
     }
 
-    /** 可选字段更新：auto 全自动开关 / minEpisode 观看基线抬升（前端上报观看进度） */
-    public SubscriptionDto update(long id, Boolean auto, Integer minEpisode) {
+    /** 可选字段更新：autoScore 自动入队阈值（v0.20 取代 auto 开关）/ minEpisode 观看基线抬升（前端上报观看进度） */
+    public SubscriptionDto update(long id, Integer autoScore, Integer minEpisode) {
         SubscriptionRepository.SubRow sub = repo.findSub(id)
                 .orElseThrow(() -> new DownloadException(404, "订阅不存在"));
-        if (auto != null) repo.setSubAuto(id, auto);
+        if (autoScore != null) repo.setSubScore(id, clampScore(autoScore));
         if (minEpisode != null) {
             int v = Math.max(0, minEpisode);
             if (v >= sub.minEpisode()) repo.setSubMinEpisode(id, v);
         }
         return toDto(repo.findSub(id).orElseThrow());
+    }
+
+    private static int clampScore(Integer autoScore) {
+        if (autoScore == null) return 0;
+        return Math.max(0, Math.min(100, autoScore));
     }
 
     public void unsubscribe(long id) {
@@ -179,7 +190,7 @@ public class SubscriptionService {
         try {
             return doCheck(sub, settings);
         } catch (Exception e) {
-            log.warn("订阅 #{}（{}）检索失败: {}", sub.id(), sub.subjectNameCn(), e.toString());
+            log.warn("订阅 #{}（{}）检索失败: {}", sub.id(), sub.subjectNameCn(), e.toString(), e);
             return 0;
         } finally {
             checking.remove(sub.subjectId());
@@ -187,8 +198,14 @@ public class SubscriptionService {
     }
 
     private int doCheck(SubscriptionRepository.SubRow sub, SubscriptionSettings settings) {
-        List<com.animeviewer.service.model.Dtos.ResourceItemDto> items = searchMerged(sub);
-        if (items.isEmpty()) {
+        SearchOutcome outcome = searchMerged(sub);
+        if (outcome.error() != null) {
+            // v0.20 SU8 检索失败显性化：全部关键词查询失败 → 记录最近错误（成功检索即清除）
+            repo.setSubLastError(sub.id(), outcome.error());
+        } else {
+            repo.setSubLastError(sub.id(), null);
+        }
+        if (outcome.items().isEmpty()) {
             repo.markChecked(sub.id(), null);
             return 0;
         }
@@ -199,10 +216,14 @@ public class SubscriptionService {
         long minBytes = settings.minSizeMb() > 0 ? settings.minSizeMb() * 1024L * 1024L : 0;
         long autoMaxBytes = settings.autoMaxSizeMb() > 0 ? settings.autoMaxSizeMb() * 1024L * 1024L : 0;
         long dayStart = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        // v0.20 SU5：评分字幕组偏好（全局偏好列表，与订阅级屏蔽 ignored 互补）
+        List<String> preferred = settings.globalFansubs();
+        // v0.20 SU4：阈值 >0 才启用自动入队（0=特殊值，全部待确认）
+        int autoScoreThreshold = sub.autoScore() == null ? 0 : sub.autoScore();
 
         int created = 0;
         Long firstHitAt = null;
-        for (var it : items) {
+        for (var it : outcome.items()) {
             if (created >= MAX_HITS_PER_CYCLE) break;
             String magnet = it.magnet();
             if (magnet == null || !magnet.startsWith("magnet:?")) continue;
@@ -219,16 +240,23 @@ public class SubscriptionService {
             String fansub = SubscriptionFilter.extractFansub(it.title());
             if (fansub != null && ignored.stream().anyMatch(x -> x.equalsIgnoreCase(fansub))) continue;
             if (repo.existsPendingEpisode(sub.subjectId(), ep)) continue;
+            // v0.20 SU6：已入队同集忽略（开关控制——关闭可补收同集其他字幕组/编码版本）
+            if (settings.skipEnqueuedEpisode() && repo.existsEnqueuedEpisode(sub.subjectId(), ep)) continue;
+
+            // v0.20 SU4 评分：命中落库即评分（服务端单端口径，前端纯展示）
+            MatchScore.Result score = MatchScore.score(sub.subjectNameCn(), sub.subjectName(),
+                    it.title(), fansub, preferred);
 
             String status = "pending";
             String note = null;
-            if (sub.auto()) {
+            if (autoScoreThreshold > 0 && score.total() >= autoScoreThreshold) {
                 String blocked = autoBlockReason(sub, settings, sizeBytes, autoMaxBytes, dayStart);
                 if (blocked == null) {
                     try {
                         downloads.enqueue(new DownloadAddRequest(magnet, sub.subjectId(), sub.subjectName(),
                                 sub.subjectNameCn(), ep));
                         status = "auto";
+                        note = "匹配度 " + score.total() + "≥阈值 " + autoScoreThreshold + "，自动入队";
                     } catch (DownloadException e) {
                         if (e.status == 409) {
                             status = "enqueued";
@@ -244,7 +272,7 @@ public class SubscriptionService {
             repo.insertHit(new SubscriptionRepository.HitRow(
                     0, sub.subjectId(), sub.subjectName(), sub.subjectNameCn(), ep,
                     it.title(), fansub, magnet, it.infoHash(), it.site(), it.size(), it.pubDate(),
-                    status, note, System.currentTimeMillis(), null));
+                    status, note, score.total(), score.detail(), System.currentTimeMillis(), null));
             created++;
             if (firstHitAt == null) firstHitAt = System.currentTimeMillis();
         }
@@ -270,14 +298,17 @@ public class SubscriptionService {
         return null;
     }
 
-    /** R2 关键词策略：中文名/原名双查询合并（infohash 优先、magnet 兜底去重，pubDate 降序） */
-    private List<com.animeviewer.service.model.Dtos.ResourceItemDto> searchMerged(SubscriptionRepository.SubRow sub) {
+    /** R2 关键词策略：中文名/原名双查询合并（infohash 优先、magnet 兜底去重，pubDate 降序）。
+     *  v0.20 SU8：error=全部关键词查询均失败时的错误摘要；部分站点失败不算（res.error 不算全挂） */
+    private SearchOutcome searchMerged(SubscriptionRepository.SubRow sub) {
         List<String> keywords = new ArrayList<>();
         for (String kw : new String[]{sub.subjectNameCn(), sub.subjectName()}) {
             if (kw != null && !kw.isBlank() && !keywords.contains(kw.trim())) keywords.add(kw.trim());
         }
         if (keywords.isEmpty()) throw new DownloadException(400, "订阅缺少可检索的关键词（条目名均为空）");
         LinkedHashMap<String, com.animeviewer.service.model.Dtos.ResourceItemDto> merged = new LinkedHashMap<>();
+        String lastError = null;
+        int failed = 0;
         for (String kw : keywords) {
             try {
                 var res = resources.search(kw, null);
@@ -286,13 +317,18 @@ public class SubscriptionService {
                     merged.merge(key, it, (a, b) -> newer(a, b));
                 }
             } catch (Exception e) {
-                log.info("订阅 #{} 关键词「{}」检索失败: {}", sub.id(), kw, e.getMessage());
+                failed++;
+                lastError = e.getMessage() == null ? e.toString() : e.getMessage();
+                log.info("订阅 #{} 关键词「{}」检索失败: {}", sub.id(), kw, lastError);
             }
         }
         List<com.animeviewer.service.model.Dtos.ResourceItemDto> out = new ArrayList<>(merged.values());
         out.sort((a, b) -> Long.compare(b.pubDate() == null ? 0 : b.pubDate(), a.pubDate() == null ? 0 : a.pubDate()));
-        return out;
+        return new SearchOutcome(out, failed >= keywords.size() ? lastError : null);
     }
+
+    /** 检索结果 + 全失败错误摘要（v0.20 SU8：null=至少一路查询成功） */
+    private record SearchOutcome(List<com.animeviewer.service.model.Dtos.ResourceItemDto> items, String error) {}
 
     private static com.animeviewer.service.model.Dtos.ResourceItemDto newer(
             com.animeviewer.service.model.Dtos.ResourceItemDto a, com.animeviewer.service.model.Dtos.ResourceItemDto b) {
@@ -391,6 +427,26 @@ public class SubscriptionService {
         return repo.deleteNonPendingHits();
     }
 
+    /** v0.20 SU7：下载完成入库绑定后自动抬升观看基线（订阅 min_episode 只升不降）。
+     *  基线原本仅由前端订阅时/详情页加载时上报抬升，离线期间滞后；媒体库最大绑定集数为权威值，
+     *  与检索阈值 max(基线, 下载最大集, 媒体库最大集) 形成语义双保险。 */
+    @EventListener
+    public void onDownloadCompleted(DownloadCompletedEvent event) {
+        if (event.subjectId() == null) return;
+        try {
+            Optional<SubscriptionRepository.SubRow> sub = repo.findSubBySubject(event.subjectId());
+            if (sub.isEmpty()) return;
+            int boundMax = media.maxEpisodeForSubject(event.subjectId());
+            if (boundMax > sub.get().minEpisode()) {
+                repo.setSubMinEpisode(sub.get().id(), boundMax);
+                log.info("订阅 #{}（{}）观看基线随入库自动抬升至第 {} 话",
+                        sub.get().id(), sub.get().subjectNameCn(), boundMax);
+            }
+        } catch (Exception e) {
+            log.warn("订阅基线自动抬升失败（任务 #{}）: {}", event.taskId(), e.toString());
+        }
+    }
+
     /* ── SU3 通知汇总 ── */
 
     public DownloadSummaryDto summary() {
@@ -412,7 +468,9 @@ public class SubscriptionService {
 
     public SubscriptionSettingsDto updateSettings(SubscriptionSettingsDto dto) {
         SubscriptionSettings merged = new SubscriptionSettings(dto.intervalMinutes(), dto.minSizeMb(),
-                dto.autoDailyLimit(), dto.autoMaxSizeMb(), dto.autoOnlyMatched());
+                dto.autoDailyLimit(), dto.autoMaxSizeMb(), dto.autoOnlyMatched(),
+                dto.defaultAutoScore(), dto.globalFansubs() == null ? List.of() : dto.globalFansubs(),
+                dto.skipEnqueuedEpisode());
         String err = merged.validate();
         if (err != null) throw new DownloadException(400, err);
         repo.putSetting(SubscriptionSettings.STORE_KEY, merged.toJson());
@@ -449,18 +507,20 @@ public class SubscriptionService {
     private static SubscriptionDto toDto(SubscriptionRepository.SubRow s) {
         return new SubscriptionDto(s.id(), s.subjectId(), s.subjectName(), s.subjectNameCn(),
                 s.auto(), s.minEpisode(), parseFansubs(s.ignoredFansubsJson()),
+                s.autoScore(), s.lastCheckError(),
                 s.lastCheckedAt(), s.lastHitAt(), s.createdAt());
     }
 
     private static SubHitDto toHitDto(SubscriptionRepository.HitRow h) {
         return new SubHitDto(h.id(), h.subjectId(), h.subjectName(), h.subjectNameCn(), h.episodeSort(),
                 h.title(), h.fansub(), h.magnet(), h.infohash(), h.site(), h.size(), h.pubDate(),
-                h.status(), h.note(), h.createdAt(), h.decidedAt());
+                h.status(), h.note(), h.score(), h.scoreDetail(), h.createdAt(), h.decidedAt());
     }
 
     private static SubscriptionSettingsDto toSettingsDto(SubscriptionSettings s) {
         return new SubscriptionSettingsDto(s.intervalMinutes(), s.minSizeMb(), s.autoDailyLimit(),
-                s.autoMaxSizeMb(), s.autoOnlyMatched());
+                s.autoMaxSizeMb(), s.autoOnlyMatched(), s.defaultAutoScore(), s.globalFansubs(),
+                s.skipEnqueuedEpisode());
     }
 
     public static String hitStatusLabel(String status) {

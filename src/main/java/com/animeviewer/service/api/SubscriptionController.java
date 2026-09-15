@@ -46,12 +46,12 @@ public class SubscriptionController {
     public SubscriptionDto subscribe(@RequestBody SubscriptionAddRequest req) {
         if (req == null || req.subjectId() == null) throw new DownloadException(400, "subjectId 必填");
         return service.subscribe(req.subjectId(), req.subjectName(), req.subjectNameCn(),
-                req.minEpisode(), req.auto());
+                req.minEpisode(), req.autoScore());
     }
 
     @PutMapping("/api/subscriptions/{id}")
     public SubscriptionDto update(@PathVariable long id, @RequestBody(required = false) SubscriptionUpdateRequest req) {
-        return service.update(id, req == null ? null : req.auto(), req == null ? null : req.minEpisode());
+        return service.update(id, req == null ? null : req.autoScore(), req == null ? null : req.minEpisode());
     }
 
     @DeleteMapping("/api/subscriptions/{id}")

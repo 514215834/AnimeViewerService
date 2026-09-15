@@ -114,7 +114,7 @@ public class DbConfig {
                       value TEXT NOT NULL
                     )""");
             // v0.19 SU1 订阅自动化：条目级订阅（一 subject 一行；min_episode=观看进度基线，
-            // 过滤阈值=max(min_episode, 已下载最大集)；auto=全自动入队（默认待确认）
+            // 过滤阈值=max(min_episode, 已下载最大集)；auto=全自动入队（v0.20 起弃用，改 auto_score 阈值，列保留兼容）
             st.execute("""
                     CREATE TABLE IF NOT EXISTS subscriptions(
                       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +124,8 @@ public class DbConfig {
                       auto INTEGER NOT NULL DEFAULT 0,
                       min_episode INTEGER NOT NULL DEFAULT 0,
                       ignored_fansubs TEXT NOT NULL DEFAULT '[]',
+                      auto_score INTEGER,
+                      last_check_error TEXT,
                       last_checked_at INTEGER,
                       last_hit_at INTEGER,
                       created_at INTEGER NOT NULL
@@ -146,11 +148,33 @@ public class DbConfig {
                       pub_date INTEGER,
                       status TEXT NOT NULL DEFAULT 'pending',
                       note TEXT,
+                      score INTEGER,
+                      score_detail TEXT,
                       created_at INTEGER NOT NULL,
                       decided_at INTEGER
                     )""");
             st.execute("CREATE INDEX IF NOT EXISTS idx_sub_hits_status ON sub_hits(status)");
             st.execute("CREATE INDEX IF NOT EXISTS idx_sub_hits_subject ON sub_hits(subject_id, episode_sort)");
+            // v0.20 存量库迁移（v0.19 已有数据的库走 ALTER 补列；重复启动列已存在则忽略）
+            try {
+                st.execute("ALTER TABLE sub_hits ADD COLUMN score INTEGER");
+            } catch (Exception e) { /* 列已存在 */ }
+            try {
+                st.execute("ALTER TABLE sub_hits ADD COLUMN score_detail TEXT");
+            } catch (Exception e) { /* 列已存在 */ }
+            try {
+                st.execute("ALTER TABLE subscriptions ADD COLUMN auto_score INTEGER");
+            } catch (Exception e) { /* 列已存在 */ }
+            try {
+                st.execute("ALTER TABLE subscriptions ADD COLUMN last_check_error TEXT");
+            } catch (Exception e) { /* 列已存在 */ }
+            // v0.20 阈值取代全自动开关：存量 auto=1 → auto_score=默认阈值（yml av.subscription.default-auto-score），
+            // auto=0 → 0（全手动）；仅执行一次（后续启动全部非 NULL 跳过）。值为 int 字面量，无注入面
+            int defaultAutoScore = props.subscription().defaultAutoScore() == null
+                    ? 0 : Math.max(0, Math.min(100, props.subscription().defaultAutoScore()));
+            st.executeUpdate(
+                    "UPDATE subscriptions SET auto_score = (CASE WHEN auto = 1 THEN " + defaultAutoScore
+                            + " ELSE 0 END) WHERE auto_score IS NULL");
         }
         return ds;
     }

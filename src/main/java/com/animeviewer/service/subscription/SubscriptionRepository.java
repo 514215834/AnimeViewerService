@@ -19,11 +19,12 @@ public class SubscriptionRepository {
     /* ── 订阅 ── */
 
     public record SubRow(long id, long subjectId, String subjectName, String subjectNameCn,
-                         boolean auto, int minEpisode, String ignoredFansubsJson,
-                         Long lastCheckedAt, Long lastHitAt, long createdAt) {}
+                         boolean auto, int minEpisode, String ignoredFansubsJson, Integer autoScore,
+                         String lastCheckError, Long lastCheckedAt, Long lastHitAt, long createdAt) {}
 
     private static final String SUB_COLUMNS =
-            "id, subject_id, subject_name, subject_name_cn, auto, min_episode, ignored_fansubs, last_checked_at, last_hit_at, created_at";
+            "id, subject_id, subject_name, subject_name_cn, auto, min_episode, ignored_fansubs, auto_score, " +
+                    "last_check_error, last_checked_at, last_hit_at, created_at";
 
     public List<SubRow> listSubs() {
         return db.sql("SELECT " + SUB_COLUMNS + " FROM subscriptions ORDER BY id")
@@ -41,13 +42,14 @@ public class SubscriptionRepository {
     }
 
     public long insertSub(long subjectId, String subjectName, String subjectNameCn,
-                          boolean auto, int minEpisode) {
+                          boolean auto, int minEpisode, Integer autoScore) {
         org.springframework.jdbc.support.KeyHolder keys = new org.springframework.jdbc.support.GeneratedKeyHolder();
         db.sql("""
-                        INSERT INTO subscriptions(subject_id, subject_name, subject_name_cn, auto, min_episode, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO subscriptions(subject_id, subject_name, subject_name_cn, auto, min_episode, auto_score, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """)
                 .param(subjectId).param(subjectName).param(subjectNameCn).param(auto ? 1 : 0).param(minEpisode)
+                .param(autoScore)
                 .param(System.currentTimeMillis())
                 .update(keys);
         Number key = keys.getKey();
@@ -60,8 +62,14 @@ public class SubscriptionRepository {
                 .param(subjectName).param(subjectNameCn).param(id).update();
     }
 
+    /** v0.19 遗留：auto 二值开关（v0.20 起由 auto_score 取代，保留方法仅兼容旧代码路径） */
     public void setSubAuto(long id, boolean auto) {
         db.sql("UPDATE subscriptions SET auto = ? WHERE id = ?").param(auto ? 1 : 0).param(id).update();
+    }
+
+    /** v0.20 自动入队阈值：0=全手动（特殊值），1~100=评分达标自动入队 */
+    public void setSubScore(long id, Integer autoScore) {
+        db.sql("UPDATE subscriptions SET auto_score = ? WHERE id = ?").param(autoScore).param(id).update();
     }
 
     public void setSubMinEpisode(long id, int minEpisode) {
@@ -103,11 +111,15 @@ public class SubscriptionRepository {
         boolean checkedNull = rs.wasNull();
         long hit = rs.getLong("last_hit_at");
         boolean hitNull = rs.wasNull();
+        int score = rs.getInt("auto_score");
+        boolean scoreNull = rs.wasNull();
+        String lastErr = rs.getString("last_check_error");
         return new SubRow(
                 rs.getLong("id"), rs.getLong("subject_id"),
                 rs.getString("subject_name"), rs.getString("subject_name_cn"),
                 rs.getInt("auto") == 1, rs.getInt("min_episode"),
                 rs.getString("ignored_fansubs"),
+                scoreNull ? null : score, lastErr == null || lastErr.isBlank() ? null : lastErr,
                 checkedNull ? null : checked, hitNull ? null : hit, rs.getLong("created_at"));
     }
 
@@ -116,22 +128,23 @@ public class SubscriptionRepository {
     public record HitRow(long id, long subjectId, String subjectName, String subjectNameCn,
                          Integer episodeSort, String title, String fansub, String magnet, String infohash,
                          String site, String size, Long pubDate, String status, String note,
-                         long createdAt, Long decidedAt) {}
+                         Integer score, String scoreDetail, long createdAt, Long decidedAt) {}
 
     private static final String HIT_COLUMNS =
             "id, subject_id, subject_name, subject_name_cn, episode_sort, title, fansub, magnet, infohash, " +
-                    "site, size, pub_date, status, note, created_at, decided_at";
+                    "site, size, pub_date, status, note, score, score_detail, created_at, decided_at";
 
     public long insertHit(HitRow h) {
         org.springframework.jdbc.support.KeyHolder keys = new org.springframework.jdbc.support.GeneratedKeyHolder();
         db.sql("""
                         INSERT INTO sub_hits(subject_id, subject_name, subject_name_cn, episode_sort, title, fansub,
-                                             magnet, infohash, site, size, pub_date, status, note, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                             magnet, infohash, site, size, pub_date, status, note, score, score_detail, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """)
                 .param(h.subjectId()).param(h.subjectName()).param(h.subjectNameCn()).param(h.episodeSort())
                 .param(h.title()).param(h.fansub()).param(h.magnet()).param(h.infohash())
                 .param(h.site()).param(h.size()).param(h.pubDate()).param(h.status()).param(h.note())
+                .param(h.score()).param(h.scoreDetail())
                 .param(System.currentTimeMillis())
                 .update(keys);
         Number key = keys.getKey();
@@ -180,6 +193,24 @@ public class SubscriptionRepository {
                 .param(subjectId).param(episodeSort).query(Long.class).optional().orElse(0L) > 0;
     }
 
+    /** v0.20 SU6 已入队集数占位：同条目同集数已有 enqueued/auto 命中（开关控制是否过滤——关闭可补收其他字幕组版本） */
+    public boolean existsEnqueuedEpisode(long subjectId, int episodeSort) {
+        return db.sql("SELECT COUNT(*) FROM sub_hits WHERE subject_id = ? AND episode_sort = ? " +
+                        "AND status IN ('enqueued','auto')")
+                .param(subjectId).param(episodeSort).query(Long.class).optional().orElse(0L) > 0;
+    }
+
+    /** v0.20 SU8 检索失败显性化：最近一轮检索的错误摘要（null=成功，前端据此显示失败红标）。
+     *  注意 null 走 SQL 字面量——sqlite-jdbc 的 PreparedStatement 不支持 getParameterType，
+     *  Spring 对未知类型 null 参数会调它导致 NPE（对齐 setHitStatus 的 COALESCE 规避惯例）。 */
+    public void setSubLastError(long id, String error) {
+        if (error == null) {
+            db.sql("UPDATE subscriptions SET last_check_error = NULL WHERE id = ?").param(id).update();
+            return;
+        }
+        db.sql("UPDATE subscriptions SET last_check_error = ? WHERE id = ?").param(error).param(id).update();
+    }
+
     /** 全自动保护 I：当日（本地时区 0 点起）已自动入队条数 */
     public long countAutoSince(long since) {
         return db.sql("SELECT COUNT(*) FROM sub_hits WHERE status = 'auto' AND created_at >= ?").param(since)
@@ -201,6 +232,8 @@ public class SubscriptionRepository {
         boolean pubNull = rs.wasNull();
         long decided = rs.getLong("decided_at");
         boolean decidedNull = rs.wasNull();
+        int score = rs.getInt("score");
+        boolean scoreNull = rs.wasNull();
         Integer sort = (Integer) rs.getObject("episode_sort");
         return new HitRow(
                 rs.getLong("id"), rs.getLong("subject_id"),
@@ -208,6 +241,7 @@ public class SubscriptionRepository {
                 rs.getString("title"), rs.getString("fansub"), rs.getString("magnet"), rs.getString("infohash"),
                 rs.getString("site"), rs.getString("size"), pubNull ? null : pub,
                 rs.getString("status"), rs.getString("note"),
+                scoreNull ? null : score, rs.getString("score_detail"),
                 rs.getLong("created_at"), decidedNull ? null : decided);
     }
 }

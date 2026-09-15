@@ -16,6 +16,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.Files;
@@ -52,6 +53,7 @@ public class DownloadService {
     private final MediaRepository mediaRepo;
     private final LibraryScanner scanner;
     private final ServiceProperties props;
+    private final ApplicationEventPublisher events;
 
     private Thread watcher;
     private java.util.concurrent.ExecutorService completionExecutor;
@@ -59,7 +61,8 @@ public class DownloadService {
 
     public DownloadService(DownloadRepository repo, Aria2Engine aria2Engine, Aria2Adapter aria2,
                            DownloadEngineRouter router, MediaRepository mediaRepo,
-                           LibraryScanner scanner, ServiceProperties props) {
+                           LibraryScanner scanner, ServiceProperties props,
+                           ApplicationEventPublisher events) {
         this.repo = repo;
         this.aria2Engine = aria2Engine;
         this.aria2 = aria2;
@@ -67,6 +70,7 @@ public class DownloadService {
         this.mediaRepo = mediaRepo;
         this.scanner = scanner;
         this.props = props;
+        this.events = events;
     }
 
     /** 任务控制/同步所属引擎（按当前设置） */
@@ -450,6 +454,9 @@ public class DownloadService {
                     }
                 }
                 log.info("任务 #{} 入库闭环结束（文件 {} 个）", t.id(), files.size());
+                if (t.subjectId() != null) {
+                    events.publishEvent(new DownloadCompletedEvent(t.id(), t.subjectId()));
+                }
             } catch (Exception e) {
                 log.warn("任务 #{} 入库闭环异常: {}", t.id(), e.toString());
             }

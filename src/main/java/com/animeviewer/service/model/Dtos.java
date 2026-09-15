@@ -108,18 +108,19 @@ public final class Dtos {
 
     public record SubscriptionDto(long id, long subjectId, String subjectName, String subjectNameCn,
                                   boolean auto, int minEpisode, List<String> ignoredFansubs,
+                                  Integer autoScore, String lastCheckError,
                                   Long lastCheckedAt, Long lastHitAt, long createdAt) {}
 
     public record SubscriptionAddRequest(Long subjectId, String subjectName, String subjectNameCn,
-                                         Integer minEpisode, Boolean auto) {}
+                                         Integer minEpisode, Integer autoScore) {}
 
-    /** 可选字段 PATCH 语义：null = 不改 */
-    public record SubscriptionUpdateRequest(Boolean auto, Integer minEpisode) {}
+    /** 可选字段 PATCH 语义：null = 不改；autoScore 为 v0.20 匹配度阈值（0=全手动特殊值，1~100 自动入队） */
+    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode) {}
 
     public record SubHitDto(long id, long subjectId, String subjectName, String subjectNameCn,
                             Integer episodeSort, String title, String fansub, String magnet, String infoHash,
                             String site, String size, Long pubDate, String status, String note,
-                            Long createdAt, Long decidedAt) {}
+                            Integer score, String scoreDetail, Long createdAt, Long decidedAt) {}
 
     public record HitIgnoreRequest(Boolean blockFansub) {}
 
@@ -128,7 +129,8 @@ public final class Dtos {
     public record HitBatchDeleteRequest(List<Long> ids) {}
 
     public record SubscriptionSettingsDto(int intervalMinutes, int minSizeMb, int autoDailyLimit,
-                                          int autoMaxSizeMb, boolean autoOnlyMatched) {}
+                                          int autoMaxSizeMb, boolean autoOnlyMatched, int defaultAutoScore,
+                                          List<String> globalFansubs, boolean skipEnqueuedEpisode) {}
 
     /** SU3 通知汇总（前端 60s 轮询）：待确认数 → 侧边栏角标；lastHit/lastCompleted 新于上次所见 → toast */
     public record DownloadSummaryDto(long pendingHits, long activeTasks, SubHitDto lastHit, TaskBrief lastCompleted) {}

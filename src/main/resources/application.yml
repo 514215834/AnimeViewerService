@@ -77,6 +77,12 @@ av:
     auto-max-size-mb: 0
     # 全自动保护 III：仅已匹配条目（媒体库无绑定文件的全自动命中降级待确认）
     auto-only-matched: true
+    # v0.20 SU4 新订阅匹配度阈值默认值（0 = 特殊值：全部命中需手动确认；1~100 = 评分达阈值自动入队）
+    default-auto-score: 0
+    # v0.20 SU5 全局字幕组偏好（逗号分隔；命中任一订阅级/全局偏好即评分 +15）
+    global-fansubs: ""
+    # v0.20 SU6 已入队集数忽略后续命中（同条目同集数已有 enqueued/auto 命中则跳过；关闭可补收其他字幕组版本）
+    skip-enqueued-episode: true
 
 logging:
   level:
