@@ -112,13 +112,20 @@ public class SubscriptionService {
         }
     }
 
-    /** 到期订阅逐个检索（间隔从设置实时读取——改配置最迟一个 tick 生效） */
+    /** 到期订阅逐个检索（间隔从设置实时读取——改配置最迟一个 tick 生效）；
+     *  v0.20 优化：开启阈值（autoScore>0）的订阅无论到期与否，每 tick 执行「待确认评分转队」，
+     *  阈值/偏好调整后存量 pending 最迟 30s 内重新评估（不依赖下一轮 RSS 检索）。 */
     private void tick() {
         SubscriptionSettings settings = currentSettings();
         long intervalMs = settings.intervalMinutes() * 60_000L;
         long now = System.currentTimeMillis();
         for (SubscriptionRepository.SubRow sub : repo.listSubs()) {
-            if (sub.lastCheckedAt() != null && now - sub.lastCheckedAt() < intervalMs) continue;
+            if (sub.lastCheckedAt() != null && now - sub.lastCheckedAt() < intervalMs) {
+                if (sub.autoScore() != null && sub.autoScore() > 0) {
+                    autoEnqueuePending(sub, settings);
+                }
+                continue;
+            }
             runCheck(sub, settings);
         }
     }
@@ -214,12 +221,8 @@ public class SubscriptionService {
                 Math.max(tasks.maxEpisodeForSubject(sub.subjectId()), media.maxEpisodeForSubject(sub.subjectId())));
         List<String> ignored = parseFansubs(sub.ignoredFansubsJson());
         long minBytes = settings.minSizeMb() > 0 ? settings.minSizeMb() * 1024L * 1024L : 0;
-        long autoMaxBytes = settings.autoMaxSizeMb() > 0 ? settings.autoMaxSizeMb() * 1024L * 1024L : 0;
-        long dayStart = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
         // v0.20 SU5：评分字幕组偏好（全局偏好列表，与订阅级屏蔽 ignored 互补）
         List<String> preferred = settings.globalFansubs();
-        // v0.20 SU4：阈值 >0 才启用自动入队（0=特殊值，全部待确认）
-        int autoScoreThreshold = sub.autoScore() == null ? 0 : sub.autoScore();
 
         int created = 0;
         Long firstHitAt = null;
@@ -243,36 +246,15 @@ public class SubscriptionService {
             // v0.20 SU6：已入队同集忽略（开关控制——关闭可补收同集其他字幕组/编码版本）
             if (settings.skipEnqueuedEpisode() && repo.existsEnqueuedEpisode(sub.subjectId(), ep)) continue;
 
-            // v0.20 SU4 评分：命中落库即评分（服务端单端口径，前端纯展示）
+            // v0.20 评分修订：评分只在落库时计算并留存（服务端单端口径），**不参与搜索/过滤阶段**——
+            // 命中一律先落待确认队列，由 autoEnqueuePending 在待确认阶段按阈值自动转队。
+            // 若在此处直接判定，infohash 跨轮去重会让低于阈值的命中永远失去重评机会（阈值后续调整也不生效）。
             MatchScore.Result score = MatchScore.score(sub.subjectNameCn(), sub.subjectName(),
                     it.title(), fansub, preferred);
-
-            String status = "pending";
-            String note = null;
-            if (autoScoreThreshold > 0 && score.total() >= autoScoreThreshold) {
-                String blocked = autoBlockReason(sub, settings, sizeBytes, autoMaxBytes, dayStart);
-                if (blocked == null) {
-                    try {
-                        downloads.enqueue(new DownloadAddRequest(magnet, sub.subjectId(), sub.subjectName(),
-                                sub.subjectNameCn(), ep));
-                        status = "auto";
-                        note = "匹配度 " + score.total() + "≥阈值 " + autoScoreThreshold + "，自动入队";
-                    } catch (DownloadException e) {
-                        if (e.status == 409) {
-                            status = "enqueued";
-                            note = "该资源已在任务列表";
-                        } else {
-                            log.warn("订阅 #{} 第 {} 话自动入队失败: {}", sub.id(), ep, e.getMessage());
-                        }
-                    }
-                } else {
-                    note = blocked;
-                }
-            }
             repo.insertHit(new SubscriptionRepository.HitRow(
                     0, sub.subjectId(), sub.subjectName(), sub.subjectNameCn(), ep,
                     it.title(), fansub, magnet, it.infoHash(), it.site(), it.size(), it.pubDate(),
-                    status, note, score.total(), score.detail(), System.currentTimeMillis(), null));
+                    "pending", null, score.total(), score.detail(), System.currentTimeMillis(), null));
             created++;
             if (firstHitAt == null) firstHitAt = System.currentTimeMillis();
         }
@@ -280,7 +262,51 @@ public class SubscriptionService {
             log.info("订阅 #{}（{}）命中 {} 条（阈值第 {} 话）", sub.id(), sub.subjectNameCn(), created, threshold);
         }
         repo.markChecked(sub.id(), firstHitAt);
+        // 待确认阶段自动转队（含本轮新命中与存量 pending——阈值调整后下一轮 tick 即生效）
+        autoEnqueuePending(sub, settings);
         return created;
+    }
+
+    /**
+     * v0.20 优化定案：待确认命中的评分自动转队。
+     * 评分机制只在此阶段消费——扫描本订阅的 pending 命中，匹配度 ≥ autoScore 阈值的
+     * 经三重保护后自动入队（status=auto + note 记录判分依据），从而：
+     * <ul>
+     *   <li>搜索/过滤阶段零评分筛选——通过基础过滤的资源 100% 落库可见，「搜索不到数据」的体感根除；</li>
+     *   <li>阈值/偏好调整后，存量 pending 在下一轮 tick（≤30s）即被重新评估，不受 infohash 去重固化影响；</li>
+     *   <li>单轮上限 MAX_HITS_PER_CYCLE 防脏数据刷屏，三重保护（日限/单限/仅已匹配）照常兜底。</li>
+     * </ul>
+     */
+    private void autoEnqueuePending(SubscriptionRepository.SubRow sub, SubscriptionSettings settings) {
+        int threshold = sub.autoScore() == null ? 0 : sub.autoScore();
+        if (threshold <= 0) return;
+        long autoMaxBytes = settings.autoMaxSizeMb() > 0 ? settings.autoMaxSizeMb() * 1024L * 1024L : 0;
+        long dayStart = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        int converted = 0;
+        for (SubscriptionRepository.HitRow h : repo.listPendingBySubject(sub.subjectId(), MAX_HITS_PER_CYCLE)) {
+            if (converted >= MAX_HITS_PER_CYCLE) break;
+            Integer score = h.score();
+            if (score == null || score < threshold) continue;
+            String blocked = autoBlockReason(sub, settings, optBytes(SubscriptionFilter.parseSizeBytes(h.size())),
+                    autoMaxBytes, dayStart);
+            if (blocked != null) continue; // 保护降级：保持待确认（note 不覆盖——searchFailure/原 note 保留）
+            try {
+                downloads.enqueue(new DownloadAddRequest(h.magnet(), sub.subjectId(), sub.subjectName(),
+                        sub.subjectNameCn(), h.episodeSort()));
+                repo.setHitStatus(h.id(), "auto", "匹配度 " + score + "≥阈值 " + threshold + "，自动入队");
+                converted++;
+            } catch (DownloadException e) {
+                if (e.status == 409) {
+                    repo.setHitStatus(h.id(), "enqueued", "该资源已在任务列表");
+                    converted++;
+                } else {
+                    log.warn("订阅 #{} 命中 #{} 待确认转自动入队失败: {}", sub.id(), h.id(), e.getMessage());
+                }
+            }
+        }
+        if (converted > 0) {
+            log.info("订阅 #{}（{}）待确认命中按阈值 {} 自动转队 {} 条", sub.id(), sub.subjectNameCn(), threshold, converted);
+        }
     }
 
     /** 全自动三重保护：命中保护任一条 → 返回降级原因（待确认人工把关），null = 允许自动入队 */

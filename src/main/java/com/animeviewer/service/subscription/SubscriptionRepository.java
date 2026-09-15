@@ -200,6 +200,12 @@ public class SubscriptionRepository {
                 .param(subjectId).param(episodeSort).query(Long.class).optional().orElse(0L) > 0;
     }
 
+    /** v0.20 待确认评分转队：本订阅的 pending 命中（id 降序=最新优先），单轮处理上限由调用方控制 */
+    public List<HitRow> listPendingBySubject(long subjectId, int limit) {
+        return db.sql("SELECT " + HIT_COLUMNS + " FROM sub_hits WHERE subject_id = ? AND status = 'pending' ORDER BY id DESC LIMIT ?")
+                .param(subjectId).param(limit).query(SubscriptionRepository::mapHit).list();
+    }
+
     /** v0.20 SU8 检索失败显性化：最近一轮检索的错误摘要（null=成功，前端据此显示失败红标）。
      *  注意 null 走 SQL 字面量——sqlite-jdbc 的 PreparedStatement 不支持 getParameterType，
      *  Spring 对未知类型 null 参数会调它导致 NPE（对齐 setHitStatus 的 COALESCE 规避惯例）。 */
