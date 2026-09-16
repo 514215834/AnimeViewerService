@@ -1,6 +1,9 @@
 package com.animeviewer.service.subscription;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.ai.AiPrompts;
+import com.animeviewer.service.ai.AiService;
+import com.animeviewer.service.ai.HitVerdict;
 import com.animeviewer.service.download.DownloadCompletedEvent;
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadRepository;
@@ -15,6 +18,7 @@ import com.animeviewer.service.model.Dtos.SubscriptionSettingsDto;
 import com.animeviewer.service.model.Dtos.TaskBrief;
 import com.animeviewer.service.resource.ResourceService;
 import com.animeviewer.service.store.MediaRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -60,6 +64,7 @@ public class SubscriptionService {
     private final ResourceService resources;
     private final DownloadService downloads;
     private final ServiceProperties props;
+    private final AiService ai;
 
     private Thread scheduler;
     private java.util.concurrent.ExecutorService checkExecutor;
@@ -68,13 +73,15 @@ public class SubscriptionService {
     private final Set<Long> checking = ConcurrentHashMap.newKeySet();
 
     public SubscriptionService(SubscriptionRepository repo, DownloadRepository tasks, MediaRepository media,
-                               ResourceService resources, DownloadService downloads, ServiceProperties props) {
+                               ResourceService resources, DownloadService downloads, ServiceProperties props,
+                               AiService ai) {
         this.repo = repo;
         this.tasks = tasks;
         this.media = media;
         this.resources = resources;
         this.downloads = downloads;
         this.props = props;
+        this.ai = ai;
     }
 
     @PostConstruct
@@ -157,8 +164,9 @@ public class SubscriptionService {
         return toDto(sub);
     }
 
-    /** 可选字段更新：autoScore 自动入队阈值（v0.20 取代 auto 开关）/ minEpisode 观看基线抬升（前端上报观看进度） */
-    public SubscriptionDto update(long id, Integer autoScore, Integer minEpisode) {
+    /** 可选字段更新：autoScore 自动入队阈值（v0.20 取代 auto 开关）/ minEpisode 观看基线抬升（前端上报观看进度）/
+     *  aiKeywords 扩展检索词（v0.22 AI2，前端编辑传 null=不改，传数组=全量覆盖） */
+    public SubscriptionDto update(long id, Integer autoScore, Integer minEpisode, List<String> aiKeywords) {
         SubscriptionRepository.SubRow sub = repo.findSub(id)
                 .orElseThrow(() -> new DownloadException(404, "订阅不存在"));
         if (autoScore != null) repo.setSubScore(id, clampScore(autoScore));
@@ -166,6 +174,7 @@ public class SubscriptionService {
             int v = Math.max(0, minEpisode);
             if (v >= sub.minEpisode()) repo.setSubMinEpisode(id, v);
         }
+        if (aiKeywords != null) repo.setSubAiKeywords(id, toJsonKeywords(sanitizeKeywords(aiKeywords)));
         return toDto(repo.findSub(id).orElseThrow());
     }
 
@@ -205,6 +214,18 @@ public class SubscriptionService {
     }
 
     private int doCheck(SubscriptionRepository.SubRow sub, SubscriptionSettings settings) {
+        // v0.22 AI2 懒生成：扩展检索词从未生成过（null）且 AI 就绪 → 首轮检索前生成一次（失败置 [] 防重试循环）
+        if (sub.aiKeywordsJson() == null && ai.settings().ready()) {
+            try {
+                List<String> generated = aiKeywords(sub);
+                repo.setSubAiKeywords(sub.id(), toJsonKeywords(generated));
+                sub = repo.findSub(sub.id()).orElse(sub);
+            } catch (Exception e) {
+                log.warn("订阅 #{} AI 扩展关键词生成失败（降级原名检索）: {}", sub.id(), e.toString());
+                repo.setSubAiKeywords(sub.id(), "[]");
+                sub = repo.findSub(sub.id()).orElse(sub);
+            }
+        }
         SearchOutcome outcome = searchMerged(sub);
         if (outcome.error() != null) {
             // v0.20 SU8 检索失败显性化：全部关键词查询失败 → 记录最近错误（成功检索即清除）
@@ -226,6 +247,7 @@ public class SubscriptionService {
 
         int created = 0;
         Long firstHitAt = null;
+        List<Long> createdIds = new ArrayList<>();
         for (var it : outcome.items()) {
             if (created >= MAX_HITS_PER_CYCLE) break;
             String magnet = it.magnet();
@@ -251,16 +273,19 @@ public class SubscriptionService {
             // 若在此处直接判定，infohash 跨轮去重会让低于阈值的命中永远失去重评机会（阈值后续调整也不生效）。
             MatchScore.Result score = MatchScore.score(sub.subjectNameCn(), sub.subjectName(),
                     it.title(), fansub, preferred);
-            repo.insertHit(new SubscriptionRepository.HitRow(
+            long hitId = repo.insertHit(new SubscriptionRepository.HitRow(
                     0, sub.subjectId(), sub.subjectName(), sub.subjectNameCn(), ep,
                     it.title(), fansub, magnet, it.infoHash(), it.site(), it.size(), it.pubDate(),
-                    "pending", null, score.total(), score.detail(), System.currentTimeMillis(), null));
+                    "pending", null, score.total(), score.detail(), System.currentTimeMillis(), null, null));
+            createdIds.add(hitId);
             created++;
             if (firstHitAt == null) firstHitAt = System.currentTimeMillis();
         }
         if (created > 0) {
             log.info("订阅 #{}（{}）命中 {} 条（阈值第 {} 话）", sub.id(), sub.subjectNameCn(), created, threshold);
         }
+        // v0.22 AI1：新命中逐条语义判定（落库后一次、结果落 ai_verdict；AI 失败/关闭静默跳过不阻塞）
+        judgeHits(sub, createdIds);
         repo.markChecked(sub.id(), firstHitAt);
         // 待确认阶段自动转队（含本轮新命中与存量 pending——阈值调整后下一轮 tick 即生效）
         autoEnqueuePending(sub, settings);
@@ -287,6 +312,9 @@ public class SubscriptionService {
             if (converted >= MAX_HITS_PER_CYCLE) break;
             Integer score = h.score();
             if (score == null || score < threshold) continue;
+            // v0.22 AI1 语义拦截：AI 已判定非本篇的命中（OP/ED/书籍/无关资源），评分达标也不自动入队
+            HitVerdict verdict = HitVerdict.parse(h.aiVerdict());
+            if (verdict != null && verdict.nonMainline()) continue;
             String blocked = autoBlockReason(sub, settings, optBytes(SubscriptionFilter.parseSizeBytes(h.size())),
                     autoMaxBytes, dayStart);
             if (blocked != null) continue; // 保护降级：保持待确认（note 不覆盖——searchFailure/原 note 保留）
@@ -325,12 +353,10 @@ public class SubscriptionService {
     }
 
     /** R2 关键词策略：中文名/原名双查询合并（infohash 优先、magnet 兜底去重，pubDate 降序）。
-     *  v0.20 SU8：error=全部关键词查询均失败时的错误摘要；部分站点失败不算（res.error 不算全挂） */
+     *  v0.20 SU8：error=全部关键词查询均失败时的错误摘要；部分站点失败不算（res.error 不算全挂）。
+     *  v0.22 AI2：合并订阅级 AI 扩展检索词（罗马字/官方英文名/繁体——RSS 子串匹配下中文名全句常为死权重）。 */
     private SearchOutcome searchMerged(SubscriptionRepository.SubRow sub) {
-        List<String> keywords = new ArrayList<>();
-        for (String kw : new String[]{sub.subjectNameCn(), sub.subjectName()}) {
-            if (kw != null && !kw.isBlank() && !keywords.contains(kw.trim())) keywords.add(kw.trim());
-        }
+        List<String> keywords = mergeKeywords(sub.subjectNameCn(), sub.subjectName(), sub.aiKeywordsJson());
         if (keywords.isEmpty()) throw new DownloadException(400, "订阅缺少可检索的关键词（条目名均为空）");
         LinkedHashMap<String, com.animeviewer.service.model.Dtos.ResourceItemDto> merged = new LinkedHashMap<>();
         String lastError = null;
@@ -355,6 +381,117 @@ public class SubscriptionService {
 
     /** 检索结果 + 全失败错误摘要（v0.20 SU8：null=至少一路查询成功） */
     private record SearchOutcome(List<com.animeviewer.service.model.Dtos.ResourceItemDto> items, String error) {}
+
+    /* ── v0.22 AI1 命中语义判定 / AI2 扩展检索词 ── */
+
+    /** 新命中逐条语义判定（落库后一次、结果落 ai_verdict；AI 未就绪/失败静默跳过不阻塞检索链路） */
+    private void judgeHits(SubscriptionRepository.SubRow sub, List<Long> hitIds) {
+        if (hitIds.isEmpty() || !ai.settings().ready()) return;
+        for (long id : hitIds) repo.findHit(id).ifPresent(this::judgeHitInternal);
+    }
+
+    /** 手动判定入口（命中行「AI 判定」按钮——存量无判定命中/复核用）；返回判定后的命中 DTO */
+    public SubHitDto judgeHitNow(long hitId) {
+        SubscriptionRepository.HitRow h = repo.findHit(hitId)
+                .orElseThrow(() -> new DownloadException(404, "命中记录不存在"));
+        if (!ai.settings().ready()) {
+            throw new DownloadException(400, "AI 未启用或未配置（设置页「AI 分析」填写接口地址与模型）");
+        }
+        judgeHitInternal(h);
+        return toHitDto(repo.findHit(hitId).orElseThrow());
+    }
+
+    private void judgeHitInternal(SubscriptionRepository.HitRow h) {
+        var sub = repo.findSubBySubject(h.subjectId());
+        JsonNode node = ai.askJson(AiPrompts.hitJudgeSystem(), AiPrompts.hitJudgeUser(
+                sub.map(SubscriptionRepository.SubRow::subjectNameCn).orElse(h.subjectNameCn()),
+                sub.map(SubscriptionRepository.SubRow::subjectName).orElse(h.subjectName()),
+                h.episodeSort() == null ? "null" : String.valueOf(h.episodeSort()),
+                h.title()));
+        if (node == null || !node.isObject()) return; // AI 失败：verdict 保持空，启发式照常
+        String json = node.toString();
+        repo.setHitAiVerdict(h.id(), json);
+        HitVerdict verdict = HitVerdict.parse(json);
+        // 自动忽略开关（默认关）：非本篇命中直接转 ignored——误判可清历史重评
+        if (verdict != null && verdict.nonMainline() && ai.settings().autoIgnoreNonEpisode()
+                && "pending".equals(h.status())) {
+            repo.setHitStatus(h.id(), "ignored",
+                    "AI 判定非本篇（" + verdict.type() + "）：" + (verdict.reason() == null ? "" : verdict.reason()));
+            log.info("命中 #{} AI 判定非本篇（{}），已自动忽略", h.id(), verdict.type());
+        }
+    }
+
+    /** v0.22 AI2：生成订阅扩展检索词并落库（手动触发用；首轮懒生成见 doCheck）；AI 未就绪抛 400 */
+    public SubscriptionDto generateHitKeywords(long id) {
+        SubscriptionRepository.SubRow sub = repo.findSub(id)
+                .orElseThrow(() -> new DownloadException(404, "订阅不存在"));
+        if (!ai.settings().ready()) {
+            throw new DownloadException(400, "AI 未启用或未配置（设置页「AI 分析」填写接口地址与模型）");
+        }
+        repo.setSubAiKeywords(id, toJsonKeywords(aiKeywords(sub)));
+        return toDto(repo.findSub(id).orElseThrow());
+    }
+
+    private List<String> aiKeywords(SubscriptionRepository.SubRow sub) {
+        JsonNode node = ai.askJson(AiPrompts.keywordsSystem(),
+                AiPrompts.keywordsUser(sub.subjectNameCn(), sub.subjectName()));
+        List<String> raw = new ArrayList<>();
+        if (node != null && node.path("keywords").isArray()) {
+            node.path("keywords").forEach(n -> { if (n.isTextual()) raw.add(n.asText()); });
+        }
+        return sanitizeKeywords(raw);
+    }
+
+    /** 关键词净化（纯函数）：去空白、忽略大小写去重、单条 ≤100 字符、至多 10 条 */
+    static List<String> sanitizeKeywords(List<String> raw) {
+        List<String> out = new ArrayList<>();
+        if (raw == null) return out;
+        for (String s : raw) {
+            if (s == null) continue;
+            String t = s.trim();
+            if (t.isEmpty() || t.length() > 100) continue;
+            if (out.stream().noneMatch(x -> x.equalsIgnoreCase(t))) out.add(t);
+            if (out.size() >= 10) break;
+        }
+        return out;
+    }
+
+    /** 检索关键词合并（纯函数，JUnit 护航）：中文名 → 原名 → AI 扩展词（顺序即查询序；大小写不敏感去重） */
+    static List<String> mergeKeywords(String nameCn, String name, String aiKeywordsJson) {
+        List<String> out = new ArrayList<>();
+        for (String kw : new String[]{nameCn, name}) {
+            if (kw == null) continue;
+            String t = kw.trim();
+            if (t.isBlank()) continue;
+            if (out.stream().noneMatch(x -> x.equalsIgnoreCase(t))) out.add(t);
+        }
+        for (String kw : parseAiKeywords(aiKeywordsJson)) {
+            if (out.stream().noneMatch(x -> x.equalsIgnoreCase(kw))) out.add(kw);
+        }
+        return out;
+    }
+
+    static List<String> parseAiKeywords(String json) {
+        List<String> out = new ArrayList<>();
+        if (json == null || json.isBlank()) return out;
+        try {
+            MAPPER.readTree(json).forEach(n -> {
+                if (n.isTextual() && !n.asText().isBlank()) out.add(n.asText().trim());
+            });
+        } catch (Exception ignore) {
+            // 损坏 JSON：视作无扩展词
+        }
+        return out;
+    }
+
+    private static String toJsonKeywords(List<String> list) {
+        try {
+            return MAPPER.writeValueAsString(list);
+        } catch (Exception e) {
+            return "[]";
+        }
+    }
+
 
     private static com.animeviewer.service.model.Dtos.ResourceItemDto newer(
             com.animeviewer.service.model.Dtos.ResourceItemDto a, com.animeviewer.service.model.Dtos.ResourceItemDto b) {
@@ -534,13 +671,14 @@ public class SubscriptionService {
         return new SubscriptionDto(s.id(), s.subjectId(), s.subjectName(), s.subjectNameCn(),
                 s.auto(), s.minEpisode(), parseFansubs(s.ignoredFansubsJson()),
                 s.autoScore(), s.lastCheckError(),
-                s.lastCheckedAt(), s.lastHitAt(), s.createdAt());
+                s.lastCheckedAt(), s.lastHitAt(), s.createdAt(),
+                s.aiKeywordsJson() == null ? null : parseAiKeywords(s.aiKeywordsJson()));
     }
 
     private static SubHitDto toHitDto(SubscriptionRepository.HitRow h) {
         return new SubHitDto(h.id(), h.subjectId(), h.subjectName(), h.subjectNameCn(), h.episodeSort(),
                 h.title(), h.fansub(), h.magnet(), h.infohash(), h.site(), h.size(), h.pubDate(),
-                h.status(), h.note(), h.score(), h.scoreDetail(), h.createdAt(), h.decidedAt());
+                h.status(), h.note(), h.score(), h.scoreDetail(), h.createdAt(), h.decidedAt(), h.aiVerdict());
     }
 
     private static SubscriptionSettingsDto toSettingsDto(SubscriptionSettings s) {

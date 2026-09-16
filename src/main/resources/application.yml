@@ -83,6 +83,21 @@ av:
     global-fansubs: ""
     # v0.20 SU6 已入队集数忽略后续命中（同条目同集数已有 enqueued/auto 命中则跳过；关闭可补收其他字幕组版本）
     skip-enqueued-episode: true
+  ai:
+    # v0.22 AI0 AI 服务默认值（运行期可在前端设置页覆盖，存 SQLite settings 表）。
+    # enabled 总开关（默认关：AI 关闭/失败时全链路行为与 v0.21 一致，零回归不变式）
+    enabled: false
+    # OpenAI 兼容接口根地址（可含 /v1；本地 Ollama 形如 http://127.0.0.1:11434/v1）
+    base-url: https://api.openai.com/v1
+    # 模型名（如 gpt-4o-mini / qwen2.5:7b）；apiKey 本地 Ollama 可留空
+    model: ""
+    api-key: ""
+    # 单次请求超时（秒）
+    timeout-seconds: 30
+    # 小时滚动配额护栏（0 = 不限；超限静默跳过，不影响主链路）
+    max-calls-per-hour: 60
+    # AI1 命中语义判定为「非本篇」时自动忽略（默认关——误判可清历史重评，谨慎开启）
+    auto-ignore-non-episode: false
 
 logging:
   level:

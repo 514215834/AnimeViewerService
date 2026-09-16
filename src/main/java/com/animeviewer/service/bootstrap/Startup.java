@@ -20,7 +20,7 @@ import java.util.HexFormat;
 public class Startup implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(Startup.class);
-    public static final String VERSION = "0.21.0";
+    public static final String VERSION = "0.22.0";
 
     private final ServiceProperties props;
     private String token = "";

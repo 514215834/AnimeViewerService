@@ -109,18 +109,21 @@ public final class Dtos {
     public record SubscriptionDto(long id, long subjectId, String subjectName, String subjectNameCn,
                                   boolean auto, int minEpisode, List<String> ignoredFansubs,
                                   Integer autoScore, String lastCheckError,
-                                  Long lastCheckedAt, Long lastHitAt, long createdAt) {}
+                                  Long lastCheckedAt, Long lastHitAt, long createdAt,
+                                  List<String> aiKeywords) {}
 
     public record SubscriptionAddRequest(Long subjectId, String subjectName, String subjectNameCn,
                                          Integer minEpisode, Integer autoScore) {}
 
-    /** 可选字段 PATCH 语义：null = 不改；autoScore 为 v0.20 匹配度阈值（0=全手动特殊值，1~100 自动入队） */
-    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode) {}
+    /** 可选字段 PATCH 语义：null = 不改；autoScore 为 v0.20 匹配度阈值（0=全手动特殊值，1~100 自动入队）；
+     *  aiKeywords 为 v0.22 AI2 扩展检索词（LLM 生成缓存/人工编辑，逐词 ≤100 字符、至多 10 条） */
+    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode, List<String> aiKeywords) {}
 
     public record SubHitDto(long id, long subjectId, String subjectName, String subjectNameCn,
                             Integer episodeSort, String title, String fansub, String magnet, String infoHash,
                             String site, String size, Long pubDate, String status, String note,
-                            Integer score, String scoreDetail, Long createdAt, Long decidedAt) {}
+                            Integer score, String scoreDetail, Long createdAt, Long decidedAt,
+                            String aiVerdict) {}
 
     public record HitIgnoreRequest(Boolean blockFansub) {}
 
@@ -136,4 +139,14 @@ public final class Dtos {
     public record DownloadSummaryDto(long pendingHits, long activeTasks, SubHitDto lastHit, TaskBrief lastCompleted) {}
 
     public record TaskBrief(long id, String name, String subjectName, String subjectNameCn, Long completedAt) {}
+
+    /* ── v0.22 AI 分析剧集（AI0 Provider 设置 + AI1 命中语义判定）── */
+
+    /** AI 设置（ready/callsThisHour 服务端只读回显，PUT 时忽略） */
+    public record AiSettingsDto(boolean enabled, String baseUrl, String model, String apiKey,
+                                int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode,
+                                boolean ready, int callsThisHour) {}
+
+    /** AI3 文件名语义解析结果（LLM 判定 → 落 pending 待人工复核） */
+    public record FileAnalyzeDto(String title, Integer episode) {}
 }

@@ -175,6 +175,14 @@ public class DbConfig {
             st.executeUpdate(
                     "UPDATE subscriptions SET auto_score = (CASE WHEN auto = 1 THEN " + defaultAutoScore
                             + " ELSE 0 END) WHERE auto_score IS NULL");
+            // v0.22 AI1 命中语义判定：落库时一次判定结果 JSON（{"type","episode","isMainline","reason"}；null=未判定）
+            try {
+                st.execute("ALTER TABLE sub_hits ADD COLUMN ai_verdict TEXT");
+            } catch (Exception e) { /* 列已存在 */ }
+            // v0.22 AI2 关键词扩展：订阅级扩展检索词 JSON 数组（LLM 生成缓存/人工编辑；null=未生成）
+            try {
+                st.execute("ALTER TABLE subscriptions ADD COLUMN ai_keywords TEXT");
+            } catch (Exception e) { /* 列已存在 */ }
         }
         return ds;
     }

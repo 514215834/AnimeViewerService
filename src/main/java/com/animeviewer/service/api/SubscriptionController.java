@@ -51,7 +51,8 @@ public class SubscriptionController {
 
     @PutMapping("/api/subscriptions/{id}")
     public SubscriptionDto update(@PathVariable long id, @RequestBody(required = false) SubscriptionUpdateRequest req) {
-        return service.update(id, req == null ? null : req.autoScore(), req == null ? null : req.minEpisode());
+        return service.update(id, req == null ? null : req.autoScore(), req == null ? null : req.minEpisode(),
+                req == null ? null : req.aiKeywords());
     }
 
     @DeleteMapping("/api/subscriptions/{id}")
@@ -100,6 +101,18 @@ public class SubscriptionController {
     @PostMapping("/api/subscriptions/hits/clear-history")
     public Map<String, Long> clearHistory() {
         return Map.of("deleted", service.clearHitHistory());
+    }
+
+    /** v0.22 AI1：手动判定命中语义（存量无判定命中/复核用）；返回判定后的命中 DTO */
+    @PostMapping("/api/subscriptions/hits/{id}/ai-judge")
+    public SubHitDto aiJudgeHit(@PathVariable long id) {
+        return service.judgeHitNow(id);
+    }
+
+    /** v0.22 AI2：AI 生成订阅扩展检索词（LLM 候选缓存到订阅行，前端可再编辑）；返回更新后的订阅 DTO */
+    @PostMapping("/api/subscriptions/{id}/ai-keywords")
+    public SubscriptionDto aiKeywords(@PathVariable long id) {
+        return service.generateHitKeywords(id);
     }
 
     @GetMapping("/api/subscriptions/settings")

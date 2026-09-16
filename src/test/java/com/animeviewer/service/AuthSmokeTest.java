@@ -28,7 +28,7 @@ class AuthSmokeTest {
         mvc.perform(get("/api/health"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.name").value("AnimeViewerService"))
-                .andExpect(jsonPath("$.version").value("0.21.0"));
+                .andExpect(jsonPath("$.version").value("0.22.0"));
 
         mvc.perform(get("/api/status")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/files")).andExpect(status().isUnauthorized());
@@ -38,7 +38,7 @@ class AuthSmokeTest {
 
         mvc.perform(get("/api/status").header("X-AV-Token", token))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.version").value("0.21.0"));
+                .andExpect(jsonPath("$.version").value("0.22.0"));
         mvc.perform(get("/api/files?limit=10").param("token", token))
                 .andExpect(status().isOk());
     }

@@ -1,5 +1,7 @@
 package com.animeviewer.service.api;
 
+import com.animeviewer.service.ai.AiPrompts;
+import com.animeviewer.service.ai.AiService;
 import com.animeviewer.service.media.BangumiMatcher;
 import com.animeviewer.service.media.LibraryScanner;
 import com.animeviewer.service.media.NameParser;
@@ -32,11 +34,13 @@ public class FilesController {
     private final MediaRepository repo;
     private final BangumiMatcher matcher;
     private final LibraryScanner scanner;
+    private final AiService ai;
 
-    public FilesController(MediaRepository repo, BangumiMatcher matcher, LibraryScanner scanner) {
+    public FilesController(MediaRepository repo, BangumiMatcher matcher, LibraryScanner scanner, AiService ai) {
         this.repo = repo;
         this.matcher = matcher;
         this.scanner = scanner;
+        this.ai = ai;
     }
 
     @GetMapping("/files")
@@ -97,6 +101,36 @@ public class FilesController {
         Integer ep = file.parsedEpisode();
         scanner.applyMatch(rowId, outcome, ep);
         return ResponseEntity.ok(outcome);
+    }
+
+    /** v0.22 AI3：文件名语义解析兜底（NameParser 正则失败的乱名/标题党文件）。
+     *  LLM 判定标题与集数 → 回写 parsed_title/parsed_episode 并置 pending（待人工复核绑定）——
+     *  **不自动绑定**（人工把关不变式）；已绑定文件走「解绑」后再解析。 */
+    @PostMapping("/files/{id}/ai-analyze")
+    public ResponseEntity<?> aiAnalyze(@PathVariable long id) {
+        MediaFileDto file = repo.findFile(id).orElse(null);
+        if (file == null) return ResponseEntity.notFound().build();
+        if ("bound".equals(file.matchState())) {
+            return ResponseEntity.badRequest().body(Map.of("message", "文件已绑定，请先解绑再 AI 解析"));
+        }
+        if (!ai.settings().ready()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "AI 未启用或未配置（设置页「AI 分析」填写接口地址与模型）"));
+        }
+        var node = ai.askJson(AiPrompts.fileNameSystem(), AiPrompts.fileNameUser(file.name()));
+        if (node == null || !node.isObject()) {
+            return ResponseEntity.status(502).body(Map.of("message", "AI 解析失败（服务不可用或返回格式异常）"));
+        }
+        String title = node.path("title").asText("").trim();
+        Integer ep = node.path("episode").isInt() && node.path("episode").asInt() > 0
+                && node.path("episode").asInt() <= 999 ? node.path("episode").asInt() : null;
+        if (title.isBlank() && ep == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "AI 未能从文件名解析出有效信息"));
+        }
+        String newTitle = title.isBlank() ? file.parsedTitle() : title;
+        Integer newEp = ep != null ? ep : file.parsedEpisode();
+        repo.updateParsed(id, newTitle, newEp, "pending");
+        return ResponseEntity.ok(Map.of("title", newTitle == null ? "" : newTitle,
+                "episode", newEp == null ? 0 : newEp, "message", "AI 解析完成，待人工确认绑定"));
     }
 
     /** 条目维度：某 Bangumi 条目已绑定的文件（详情页剧集 Tab 渲染播放按钮） */

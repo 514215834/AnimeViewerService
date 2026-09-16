@@ -16,7 +16,8 @@ public record ServiceProperties(
         Proxy proxy,
         Webdav webdav,
         Aria2 aria2,
-        Subscription subscription
+        Subscription subscription,
+        Ai ai
 ) {
     public record Bangumi(String baseUrl, String userAgent, long matchThrottleMs,
                           String proxyHost, Integer proxyPort, String proxyMode) {}
@@ -54,6 +55,16 @@ public record ServiceProperties(
                                Integer autoMaxSizeMb, boolean autoOnlyMatched, Integer defaultAutoScore,
                                String globalFansubs, Boolean skipEnqueuedEpisode) {}
 
+    /**
+     * v0.22 AI0 AI 服务 yml 默认值——运行期可经 /api/ai/settings 覆盖（存 SQLite settings 表 key=ai）。
+     * enabled 总开关（默认关：AI 关闭/失败时全链路行为与 v0.21 一致，零回归不变式）；
+     * baseUrl OpenAI 兼容接口根地址（可含 /v1；本地 Ollama 形如 http://127.0.0.1:11434/v1）；
+     * model 模型名；apiKey 可空（本地 Ollama 无鉴权）；timeoutSeconds 单次请求超时；
+     * maxCallsPerHour 小时滚动配额护栏（0=不限）；autoIgnoreNonEpisode 命中语义判定非本篇时自动忽略（默认关）。
+     */
+    public record Ai(Boolean enabled, String baseUrl, String model, String apiKey,
+                     Integer timeoutSeconds, Integer maxCallsPerHour, Boolean autoIgnoreNonEpisode) {}
+
     public ServiceProperties {
         if (dataDir == null || dataDir.isBlank()) dataDir = "./data";
         if (ffmpegPath == null || ffmpegPath.isBlank()) ffmpegPath = "ffmpeg";
@@ -66,5 +77,6 @@ public record ServiceProperties(
         if (aria2 == null) aria2 = new Aria2("aria2c", "", "", 16800, "./data/downloads", 2, "",
                 List.of(), true, 0, false);
         if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true, 0, "", null);
+        if (ai == null) ai = new Ai(false, "https://api.openai.com/v1", "", "", 30, 60, false);
     }
 }

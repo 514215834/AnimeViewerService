@@ -20,11 +20,12 @@ public class SubscriptionRepository {
 
     public record SubRow(long id, long subjectId, String subjectName, String subjectNameCn,
                          boolean auto, int minEpisode, String ignoredFansubsJson, Integer autoScore,
-                         String lastCheckError, Long lastCheckedAt, Long lastHitAt, long createdAt) {}
+                         String lastCheckError, Long lastCheckedAt, Long lastHitAt, long createdAt,
+                         String aiKeywordsJson) {}
 
     private static final String SUB_COLUMNS =
             "id, subject_id, subject_name, subject_name_cn, auto, min_episode, ignored_fansubs, auto_score, " +
-                    "last_check_error, last_checked_at, last_hit_at, created_at";
+                    "last_check_error, last_checked_at, last_hit_at, created_at, ai_keywords";
 
     public List<SubRow> listSubs() {
         return db.sql("SELECT " + SUB_COLUMNS + " FROM subscriptions ORDER BY id")
@@ -80,6 +81,11 @@ public class SubscriptionRepository {
         db.sql("UPDATE subscriptions SET ignored_fansubs = ? WHERE id = ?").param(ignoredFansubsJson).param(id).update();
     }
 
+    /** v0.22 AI2 扩展检索词（JSON 数组字符串；null = 未生成过） */
+    public void setSubAiKeywords(long id, String aiKeywordsJson) {
+        db.sql("UPDATE subscriptions SET ai_keywords = ? WHERE id = ?").param(aiKeywordsJson).param(id).update();
+    }
+
     /** 一轮检索结束：更新 last_checked_at；本轮有新命中时同时抬升 last_hit_at */
     public void markChecked(long id, Long hitAt) {
         if (hitAt == null) {
@@ -120,7 +126,8 @@ public class SubscriptionRepository {
                 rs.getInt("auto") == 1, rs.getInt("min_episode"),
                 rs.getString("ignored_fansubs"),
                 scoreNull ? null : score, lastErr == null || lastErr.isBlank() ? null : lastErr,
-                checkedNull ? null : checked, hitNull ? null : hit, rs.getLong("created_at"));
+                checkedNull ? null : checked, hitNull ? null : hit, rs.getLong("created_at"),
+                rs.getString("ai_keywords"));
     }
 
     /* ── 命中台账（待确认队列 + 历史）── */
@@ -128,11 +135,11 @@ public class SubscriptionRepository {
     public record HitRow(long id, long subjectId, String subjectName, String subjectNameCn,
                          Integer episodeSort, String title, String fansub, String magnet, String infohash,
                          String site, String size, Long pubDate, String status, String note,
-                         Integer score, String scoreDetail, long createdAt, Long decidedAt) {}
+                         Integer score, String scoreDetail, long createdAt, Long decidedAt, String aiVerdict) {}
 
     private static final String HIT_COLUMNS =
             "id, subject_id, subject_name, subject_name_cn, episode_sort, title, fansub, magnet, infohash, " +
-                    "site, size, pub_date, status, note, score, score_detail, created_at, decided_at";
+                    "site, size, pub_date, status, note, score, score_detail, created_at, decided_at, ai_verdict";
 
     public long insertHit(HitRow h) {
         org.springframework.jdbc.support.KeyHolder keys = new org.springframework.jdbc.support.GeneratedKeyHolder();
@@ -248,6 +255,11 @@ public class SubscriptionRepository {
                 rs.getString("site"), rs.getString("size"), pubNull ? null : pub,
                 rs.getString("status"), rs.getString("note"),
                 scoreNull ? null : score, rs.getString("score_detail"),
-                rs.getLong("created_at"), decidedNull ? null : decided);
+                rs.getLong("created_at"), decidedNull ? null : decided, rs.getString("ai_verdict"));
+    }
+
+    /** v0.22 AI1 落库后回填语义判定（JSON 字符串；null 不可走参数——同 setSubLastError 的 COALESCE 规避惯例） */
+    public void setHitAiVerdict(long id, String verdictJson) {
+        db.sql("UPDATE sub_hits SET ai_verdict = ? WHERE id = ?").param(verdictJson).param(id).update();
     }
 }

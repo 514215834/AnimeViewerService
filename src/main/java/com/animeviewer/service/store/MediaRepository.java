@@ -161,6 +161,12 @@ public class MediaRepository {
         db.sql("DELETE FROM media_files WHERE id = ?").param(id).update();
     }
 
+    /** v0.22 AI3：回写语义解析结果（标题/集数）并置 pending 待人工复核——不自动绑定（人工把关不变式） */
+    public void updateParsed(long id, String parsedTitle, Integer parsedEpisode, String state) {
+        db.sql("UPDATE media_files SET parsed_title = ?, parsed_episode = ?, match_state = ? WHERE id = ?")
+                .param(parsedTitle).param(parsedEpisode).param(state).param(id).update();
+    }
+
     /** v0.16 DN5：下载完成后回填来源任务 id（「来自下载任务」溯源） */
     public void markFromTask(long id, long taskId) {
         db.sql("UPDATE media_files SET download_task_id = ? WHERE id = ? AND download_task_id IS NULL")
