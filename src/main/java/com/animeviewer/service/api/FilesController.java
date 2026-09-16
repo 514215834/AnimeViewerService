@@ -104,8 +104,10 @@ public class FilesController {
     }
 
     /** v0.22 AI3：文件名语义解析兜底（NameParser 正则失败的乱名/标题党文件）。
-     *  LLM 判定标题与集数 → 回写 parsed_title/parsed_episode 并置 pending（待人工复核绑定）——
-     *  **不自动绑定**（人工把关不变式）；已绑定文件走「解绑」后再解析。 */
+     *  LLM 判定标题与集数 → 回写 parsed_title/parsed_episode；随后用解析标题走 BangumiMatcher
+     *  **预填关联条目**（v0.22 实测优化：此前「确认」还要人工弹窗搜索——现在待确认行直接带
+     *  「疑似《X》」，点「确认」一键绑定）。仍置 pending，不自动绑定（人工把关不变式）；
+     *  已绑定文件走「解绑」后再解析。 */
     @PostMapping("/files/{id}/ai-analyze")
     public ResponseEntity<?> aiAnalyze(@PathVariable long id) {
         MediaFileDto file = repo.findFile(id).orElse(null);
@@ -129,8 +131,27 @@ public class FilesController {
         String newTitle = title.isBlank() ? file.parsedTitle() : title;
         Integer newEp = ep != null ? ep : file.parsedEpisode();
         repo.updateParsed(id, newTitle, newEp, "pending");
-        return ResponseEntity.ok(Map.of("title", newTitle == null ? "" : newTitle,
-                "episode", newEp == null ? 0 : newEp, "message", "AI 解析完成，待人工确认绑定"));
+        // 解析出的标题立刻匹配 Bangumi 条目并预填（pending + 条目 = 「疑似《X》」，确认一键绑定）
+        Long subjectId = null;
+        String subjectLabel = null;
+        if (newTitle != null && !newTitle.isBlank()) {
+            MatchOutcome outcome = matcher.match(newTitle, newEp);
+            if (outcome.subjectId() != null) {
+                subjectId = outcome.subjectId();
+                subjectLabel = outcome.subjectNameCn() == null || outcome.subjectNameCn().isBlank()
+                        ? outcome.subjectName() : outcome.subjectNameCn();
+                repo.updateMatch(id, "pending", outcome.subjectId(), outcome.subjectName(),
+                        outcome.subjectNameCn(), newEp, false);
+            }
+        }
+        return ResponseEntity.ok(Map.of(
+                "title", newTitle == null ? "" : newTitle,
+                "episode", newEp == null ? 0 : newEp,
+                "subjectId", subjectId == null ? 0 : subjectId,
+                "subjectName", subjectLabel == null ? "" : subjectLabel,
+                "message", subjectId == null
+                        ? "AI 解析完成，未找到相近条目（可人工绑定）"
+                        : "AI 解析完成：已关联《" + subjectLabel + "》，点「确认」完成绑定"));
     }
 
     /** 条目维度：某 Bangumi 条目已绑定的文件（详情页剧集 Tab 渲染播放按钮） */
