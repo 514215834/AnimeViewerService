@@ -36,14 +36,15 @@ public class AiController {
                 dto.enabled(), dto.baseUrl() == null ? "" : dto.baseUrl().trim(),
                 dto.model() == null ? "" : dto.model().trim(),
                 dto.apiKey() == null ? "" : dto.apiKey(),
-                dto.timeoutSeconds(), dto.maxCallsPerHour(), dto.autoIgnoreNonEpisode()));
+                dto.timeoutSeconds(), dto.maxCallsPerHour(), dto.autoIgnoreNonEpisode(),
+                dto.extraHeaders() == null ? "" : dto.extraHeaders()));
         return toDto(saved);
     }
 
     private AiSettingsDto toDto(AiSettings s) {
         return new AiSettingsDto(s.enabled(), s.baseUrl(), s.model(), s.apiKey(),
                 s.timeoutSeconds(), s.maxCallsPerHour(), s.autoIgnoreNonEpisode(),
-                s.ready(), service.callsThisHour());
+                s.ready(), service.callsThisHour(), s.extraHeaders());
     }
 
     @ExceptionHandler(DownloadException.class)

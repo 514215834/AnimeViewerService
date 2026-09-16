@@ -4,6 +4,9 @@ import com.animeviewer.service.ServiceProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * v0.22 AI0 AI 设置：yml（av.ai.*）提供默认值，SQLite settings 表存 JSON 覆盖（key=ai），
  * 前端设置页读写；字段缺失/类型不符时回退默认（损坏 JSON 整体回退，对齐 SubscriptionSettings 同款模式）。
@@ -18,7 +21,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public record AiSettings(
         boolean enabled, String baseUrl, String model, String apiKey,
-        int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode) {
+        int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode,
+        String extraHeaders) {
 
     public static final String STORE_KEY = "ai";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -32,7 +36,8 @@ public record AiSettings(
                 or(s.apiKey(), ""),
                 clamp(s.timeoutSeconds() == null ? 30 : s.timeoutSeconds(), 5, 120),
                 Math.max(0, s.maxCallsPerHour() == null ? 60 : s.maxCallsPerHour()),
-                s.autoIgnoreNonEpisode() != null && s.autoIgnoreNonEpisode());
+                s.autoIgnoreNonEpisode() != null && s.autoIgnoreNonEpisode(),
+                or(s.extraHeaders(), ""));
     }
 
     public static AiSettings load(String storedJson, AiSettings defaults) {
@@ -46,7 +51,8 @@ public record AiSettings(
                     or(textOf(n, "apiKey"), defaults.apiKey()),
                     clamp(intOf(n, "timeoutSeconds", defaults.timeoutSeconds()), 5, 120),
                     Math.max(0, intOf(n, "maxCallsPerHour", defaults.maxCallsPerHour())),
-                    boolOf(n, "autoIgnoreNonEpisode", defaults.autoIgnoreNonEpisode()));
+                    boolOf(n, "autoIgnoreNonEpisode", defaults.autoIgnoreNonEpisode()),
+                    or(textOf(n, "extraHeaders"), defaults.extraHeaders()));
         } catch (Exception e) {
             return defaults;
         }
@@ -62,6 +68,7 @@ public record AiSettings(
             node.put("timeoutSeconds", timeoutSeconds);
             node.put("maxCallsPerHour", maxCallsPerHour);
             node.put("autoIgnoreNonEpisode", autoIgnoreNonEpisode);
+            node.put("extraHeaders", extraHeaders);
             return MAPPER.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
@@ -77,7 +84,30 @@ public record AiSettings(
         }
         if (timeoutSeconds < 5 || timeoutSeconds > 120) return "超时需在 5~120 秒";
         if (maxCallsPerHour < 0 || maxCallsPerHour > 10_000) return "每小时调用上限需在 0~10000（0=不限）";
+        for (String err : parseHeaders().errors()) return err;
         return null;
+    }
+
+    /** 解析逐行附加头（「Name: Value」）；errors 非空 = 存在非法行（validate 消费）。 */
+    public record HeaderList(List<String[]> pairs, List<String> errors) {}
+
+    public HeaderList parseHeaders() {
+        List<String[]> pairs = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        if (extraHeaders == null) return new HeaderList(pairs, errors);
+        for (String line : extraHeaders.split("\r?\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) continue;
+            int i = t.indexOf(':');
+            String name = i < 0 ? "" : t.substring(0, i).trim();
+            String value = i < 0 ? "" : t.substring(i + 1).trim();
+            if (i < 0 || name.isEmpty() || value.isEmpty() || !name.matches("[A-Za-z0-9-]{1,32}")) {
+                errors.add("自定义请求头需为「名称: 值」每行一条（名称限字母/数字/连字符）: " + t);
+                continue;
+            }
+            pairs.add(new String[]{name, value});
+        }
+        return new HeaderList(pairs, errors);
     }
 
     /** AI 是否就绪（可发起判定）：开 + 地址 + 模型 */

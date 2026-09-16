@@ -114,6 +114,8 @@ public class AiService {
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)));
             if (!s.apiKey().isBlank()) rb.header("Authorization", "Bearer " + s.apiKey());
+            // v0.22 自定义请求头（非标网关通道，如 opencode zen 需 x-opencode-session）
+            for (String[] h : s.parseHeaders().pairs()) rb.header(h[0], h[1]);
             HttpResponse<String> resp = client.send(rb.build(), HttpResponse.BodyHandlers.ofString());
             countCall();
             if (resp.statusCode() / 100 != 2) {

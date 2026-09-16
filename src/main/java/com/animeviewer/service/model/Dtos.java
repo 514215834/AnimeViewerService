@@ -142,10 +142,10 @@ public final class Dtos {
 
     /* ── v0.22 AI 分析剧集（AI0 Provider 设置 + AI1 命中语义判定）── */
 
-    /** AI 设置（ready/callsThisHour 服务端只读回显，PUT 时忽略） */
+    /** AI 设置（ready/callsThisHour 服务端只读回显，PUT 时忽略）；extraHeaders 每行「Name: Value」附加头 */
     public record AiSettingsDto(boolean enabled, String baseUrl, String model, String apiKey,
                                 int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode,
-                                boolean ready, int callsThisHour) {}
+                                boolean ready, int callsThisHour, String extraHeaders) {}
 
     /** AI3 文件名语义解析结果（LLM 判定 → 落 pending 待人工复核） */
     public record FileAnalyzeDto(String title, Integer episode) {}

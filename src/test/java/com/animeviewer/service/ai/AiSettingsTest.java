@@ -26,7 +26,7 @@ class AiSettingsTest {
     @Test
     void jsonRoundTripPreservesFields() {
         AiSettings s = new AiSettings(true, "http://127.0.0.1:11434/v1", "qwen2.5:7b", "sk-1",
-                45, 100, true);
+                45, 100, true, "x-opencode-session: sess-1");
         AiSettings back = AiSettings.load(s.toJson(), AiSettings.defaults(NULL_PROPS));
         assertEquals(s, back);
         assertTrue(back.ready());
@@ -41,7 +41,7 @@ class AiSettingsTest {
     @Test
     void partialJsonMergesWithDefaults() {
         AiSettings back = AiSettings.load("{\"enabled\":true,\"model\":\"gpt-4o-mini\"}",
-                new AiSettings(false, "https://api.openai.com/v1", "", "", 30, 60, false));
+                new AiSettings(false, "https://api.openai.com/v1", "", "", 30, 60, false, ""));
         assertTrue(back.enabled());
         assertEquals("gpt-4o-mini", back.model());
         assertEquals("https://api.openai.com/v1", back.baseUrl());
@@ -50,22 +50,35 @@ class AiSettingsTest {
     @Test
     void validateRejectsBadInput() {
         assertEquals("已启用 AI 时必须填写接口地址",
-                new AiSettings(true, "", "m", "", 30, 60, false).validate());
+                new AiSettings(true, "", "m", "", 30, 60, false, "").validate());
         assertEquals("已启用 AI 时必须填写模型名",
-                new AiSettings(true, "https://x/v1", "", "", 30, 60, false).validate());
+                new AiSettings(true, "https://x/v1", "", "", 30, 60, false, "").validate());
         assertEquals("接口地址需以 http(s):// 开头",
-                new AiSettings(true, "ftp://x", "m", "", 30, 60, false).validate());
+                new AiSettings(true, "ftp://x", "m", "", 30, 60, false, "").validate());
         assertEquals("超时需在 5~120 秒",
-                new AiSettings(true, "https://x", "m", "", 3, 60, false).validate());
-        assertNull(new AiSettings(false, "", "", "", 30, 0, false).validate());
+                new AiSettings(true, "https://x", "m", "", 3, 60, false, "").validate());
+        assertNull(new AiSettings(false, "", "", "", 30, 0, false, "").validate());
     }
 
     @Test
     void readyRequiresEnabledAndUrlAndModel() {
-        assertTrue(new AiSettings(true, "https://x/v1", "m", "", 30, 60, false).ready());
-        assertTrue(!new AiSettings(false, "https://x/v1", "m", "", 30, 60, false).ready());
-        assertTrue(!new AiSettings(true, "https://x/v1", "", "", 30, 60, false).ready());
-        assertTrue(!new AiSettings(true, "", "m", "", 30, 60, false).ready());
+        assertTrue(new AiSettings(true, "https://x/v1", "m", "", 30, 60, false, "").ready());
+        assertTrue(!new AiSettings(false, "https://x/v1", "m", "", 30, 60, false, "").ready());
+        assertTrue(!new AiSettings(true, "https://x/v1", "", "", 30, 60, false, "").ready());
+        assertTrue(!new AiSettings(true, "", "m", "", 30, 60, false, "").ready());
+    }
+
+    @Test
+    void extraHeadersParseAndValidate() {
+        AiSettings s = new AiSettings(true, "https://x/v1", "m", "", 30, 60, false,
+                "x-opencode-session: sess-1\nX-Retry: 2\n\nbadline\nbad name: v");
+        AiSettings.HeaderList h = s.parseHeaders();
+        assertEquals(2, h.pairs().size());
+        assertEquals("x-opencode-session", h.pairs().get(0)[0]);
+        assertEquals("sess-1", h.pairs().get(0)[1]);
+        assertEquals(2, h.errors().size());
+        assertTrue(s.validate() != null); // 非法行 → 校验失败
+        assertNull(new AiSettings(true, "https://x/v1", "m", "", 30, 60, false, "x-opencode-session: sess-1").validate());
     }
 
     @Test
