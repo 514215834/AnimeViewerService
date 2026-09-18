@@ -149,4 +149,9 @@ public final class Dtos {
 
     /** AI3 文件名语义解析结果（LLM 判定 → 落 pending 待人工复核） */
     public record FileAnalyzeDto(String title, Integer episode) {}
+
+    /* ── v0.23 SB1 内封字幕（枚举 + VTT 提取）── */
+
+    /** 字幕轨：index 为字幕轨序号（0 基，字幕轨内排序，非流 index）；codec/language/title 可能缺省 */
+    public record SubtitleTrackDto(int index, String codec, String language, String title) {}
 }

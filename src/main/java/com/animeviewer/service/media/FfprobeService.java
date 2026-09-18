@@ -1,15 +1,18 @@
 package com.animeviewer.service.media;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.model.Dtos.SubtitleTrackDto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/** ffprobe 封装：取时长 / 容器 / 编码 / 分辨率。失败不抛出（返回 null 字段并记录 error），不阻塞扫描。 */
+/** ffprobe 封装：取时长 / 容器 / 编码 / 分辨率；v0.23 SB1 增加字幕轨枚举。失败不抛出（返回 null 字段并记录 error），不阻塞扫描。 */
 @Component
 public class FfprobeService {
 
@@ -86,5 +89,60 @@ public class FfprobeService {
         if (err == null || err.isBlank()) return "ffprobe 失败";
         String one = err.strip().replaceAll("\\s+", " ");
         return one.length() > 200 ? one.substring(one.length() - 200) : one;
+    }
+
+    /* ── v0.23 SB1 字幕轨枚举 ── */
+
+    /** 枚举内封字幕轨（-select_streams s）：失败返回空列表并记录 debug（无字幕轨是常态，不算错误）。 */
+    public List<SubtitleTrackDto> subtitles(String path) {
+        try {
+            var pb = new ProcessBuilder(
+                    props.ffprobePath(), "-v", "error",
+                    "-print_format", "json",
+                    "-select_streams", "s",
+                    "-show_streams",
+                    path);
+            pb.redirectErrorStream(false);
+            var proc = pb.start();
+            String stdout;
+            try (var in = proc.getInputStream()) {
+                stdout = new String(in.readAllBytes());
+            }
+            boolean finished = proc.waitFor(Math.max(5, props.scan().probeTimeoutSeconds()), TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return List.of();
+            }
+            if (proc.exitValue() != 0) {
+                log.debug("字幕轨枚举失败: {} tail={}", path, trimErr(new String(proc.getErrorStream().readAllBytes())));
+                return List.of();
+            }
+            return parseSubtitleTracks(stdout);
+        } catch (Exception e) {
+            log.warn("字幕轨枚举失败: {} ({})", path, e.toString());
+            return List.of();
+        }
+    }
+
+    /** 解析 -select_streams s 输出（包级可见纯函数，供单测）：
+     *  只收 codec_type=subtitle 的流；index 为字幕轨序号（按出现顺序 0 基），language/title 可缺省（如实为 null）。 */
+    List<SubtitleTrackDto> parseSubtitleTracks(String stdout) {
+        var out = new ArrayList<SubtitleTrackDto>();
+        try {
+            JsonNode root = mapper.readTree(stdout);
+            for (JsonNode s : root.path("streams")) {
+                if (!"subtitle".equals(s.path("codec_type").asText(""))) continue;
+                JsonNode tags = s.path("tags");
+                String lang = tags.path("language").isMissingNode() || tags.path("language").isNull()
+                        ? null : tags.path("language").asText();
+                String title = tags.path("title").isMissingNode() || tags.path("title").isNull()
+                        ? null : tags.path("title").asText();
+                out.add(new SubtitleTrackDto(out.size(), s.path("codec_name").asText(null), lang, title));
+            }
+        } catch (Exception e) {
+            log.debug("字幕轨解析失败: {}", e.toString());
+            return List.of();
+        }
+        return out;
     }
 }

@@ -23,16 +23,19 @@ import java.util.Locale;
 import java.util.Set;
 
 /** S4 流式播放：
- *  - mp4/m4v/webm（H.264/VP9/AAC 等浏览器原生可解码）→ HTTP Range 随机访问（206 分段）
- *  - 其余容器（mkv/avi/ts/wmv/flv…）→ ffmpeg 转封装 fMP4 流（?t= 秒指定起点，seek 重拉）
+ *  - mp4/m4v/webm（H.264/VP9/AAC 等浏览器原生可解码）与 mkv（v0.23 SB0 直发探测通过）→ HTTP Range 随机访问（206 分段）
+ *  - 其余容器（avi/ts/wmv/flv…）→ ffmpeg 转封装 fMP4 流（?t= 秒指定起点，seek 重拉）
  *  <video> 标签无法携带自定义请求头，Token 经查询参数传递（本服务为局域网个人服务，风险可接受）。 */
 @RestController
 public class StreamController {
 
     private static final Logger log = LoggerFactory.getLogger(StreamController.class);
 
-    /** 浏览器原生可播且容器可随机访问的扩展名 */
-    private static final Set<String> DIRECT_EXTS = Set.of("mp4", "m4v", "webm");
+    /** 浏览器原生可播且容器可随机访问的扩展名。
+     *  v0.23 SB0a 探测定案：mkv 直发（video/webm MIME + FileChannel Range）实测 h264+aac /
+     *  h264+flac / HEVC-10bit 三态全部通过——duration 精确、全程 seekable、中段/结尾/回跳 seek 正常，
+     *  与既有 mp4 直发行为一致（真实库样例 GTO 62s 同样通过）。直发失败由前端自动降级转封装重试。 */
+    private static final Set<String> DIRECT_EXTS = Set.of("mp4", "m4v", "webm", "mkv");
 
     private static final Set<String> CONTENT_TYPES = Set.of(
             "video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/x-ms-wmv", "video/mp2t", "video/quicktime");
@@ -147,13 +150,13 @@ public class StreamController {
     private static String contentTypeOf(String ext) {
         return switch (ext == null ? "" : ext.toLowerCase(Locale.ROOT)) {
             case "mp4", "m4v" -> "video/mp4";
-            case "webm" -> "video/webm";
+            case "webm", "mkv" -> "video/webm"; // SB0：mkv 以 webm MIME 直发（Matroska 容器浏览器按 webm 解析）
             case "ogv" -> "video/ogg";
             case "avi" -> "video/x-msvideo";
             case "wmv" -> "video/x-ms-wmv";
             case "ts", "m2ts" -> "video/mp2t";
             case "mov" -> "video/quicktime";
-            default -> "video/mp4"; // mkv/flv 等统一走转封装 fMP4 输出
+            default -> "video/mp4"; // flv 等统一走转封装 fMP4 输出
         };
     }
 }
