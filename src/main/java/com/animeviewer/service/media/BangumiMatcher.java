@@ -56,17 +56,11 @@ public class BangumiMatcher {
     }
 
     private RestClient buildClient(boolean viaProxy) {
-        // v0.26 补记：SimpleClientHttpRequestFactory（HttpURLConnection）经代理访问 api.bgm.tv 稳定 502
-        // （curl/JDK HttpClient 同代理均 200，实锤为老连接栈问题）——换 JdkClientHttpRequestFactory
-        // （java.net.http.HttpClient，与 HanimeService 同款）。直连 5s 快速失败切代理，读超时 20s。
-        var jdk = java.net.http.HttpClient.newBuilder()
-                .connectTimeout(java.time.Duration.ofSeconds(5));
+        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
         if (viaProxy) {
-            jdk.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(
-                    props.bangumi().proxyHost(), props.bangumi().proxyPort())));
+            factory.setProxy(new java.net.Proxy(java.net.Proxy.Type.HTTP,
+                    new java.net.InetSocketAddress(props.bangumi().proxyHost(), props.bangumi().proxyPort())));
         }
-        var factory = new org.springframework.http.client.JdkClientHttpRequestFactory(jdk.build());
-        factory.setReadTimeout(java.time.Duration.ofSeconds(20));
         return RestClient.builder()
                 .baseUrl(props.bangumi().baseUrl())
                 .requestFactory(factory)
@@ -75,17 +69,14 @@ public class BangumiMatcher {
                 .build();
     }
 
-    /** 统一请求执行：auto 模式下连接级失败（ResourceAccessException）自动切换线路重试一次，成功线路粘性记忆。
-     *  v0.26 补记：尝试次数 2→3，并新增网关级瞬时故障（502/503/504）同线路重试——bgm 边缘经部分代理
-     *  出口间歇性 502（实测 502 窗口与 200 窗口交替），原「2 次 + 仅连接级切线」会把瞬时 502 直接透传给前端；
-     *  4xx/其余 5xx 为确定性失败，立即透传不重试。 */
+    /** 统一请求执行：auto 模式下连接级失败（ResourceAccessException）自动切换线路重试一次，成功线路粘性记忆 */
     private String exchange(java.util.function.Function<RestClient, String> call) {
         if (!autoFailover) {
             return call.apply(proxyOnly ? restProxy : restDirect);
         }
         boolean tryProxy = useProxy;
-        RuntimeException lastError = null;
-        for (int attempt = 0; attempt < 3; attempt++) {
+        org.springframework.web.client.ResourceAccessException lastError = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
             RestClient client = tryProxy ? restProxy : restDirect;
             if (client == null) {
                 tryProxy = !tryProxy;
@@ -102,53 +93,15 @@ public class BangumiMatcher {
                         rootMessage(e),
                         tryProxy ? "直连" : "经代理");
                 tryProxy = !tryProxy;
-            } catch (org.springframework.web.client.RestClientResponseException e) {
-                int status = e.getStatusCode().value();
-                if (status == 502 || status == 503 || status == 504) {
-                    // 网关级瞬时故障：bgm 边缘已应答（线路可达），同线路重试
-                    lastError = e;
-                    log.warn("Bangumi {}收到网关级 {}（bgm 边缘瞬时故障），同线路重试",
-                            tryProxy ? "经代理请求" : "直连请求", status);
-                    continue;
-                }
-                throw e;
             }
         }
-        throw lastError != null ? lastError : new org.springframework.web.client.RestClientException("Bangumi 请求失败");
+        throw lastError;
     }
 
     private static String rootMessage(Throwable e) {
         Throwable cur = e;
         while (cur.getCause() != null && cur.getCause() != cur) cur = cur.getCause();
         return cur.getMessage() == null ? e.getMessage() : cur.getMessage();
-    }
-
-    /** v0.26 补记：GET /v0/* 只读透传执行——浏览器直连 api.bgm.tv 存在环境性故障（预检 OPTIONS 502 /
-     *  直连超时），前端把带 Authorization 的 GET 交由服务端执行。走既有直连→代理容灾；authHeader 为
-     *  用户 Access Token（可空，公共数据匿名可用）。上游 4xx/5xx 以 RestClientResponseException 抛出，
-     *  由控制器透传状态码与响应体。 */
-    public String fetchV0(String pathAndQuery, String authHeader) {
-        return exchange(rc -> {
-            var spec = rc.get().uri(java.net.URI.create(props.bangumi().baseUrl() + pathAndQuery));
-            if (authHeader != null && !authHeader.isBlank()) spec = spec.header("Authorization", authHeader);
-            return spec.retrieve().body(String.class);
-        });
-    }
-
-    /** v0.26 补记：OAuth 授权码换 Token 服务端代理——bgm.tv oauth 端点的响应不允许浏览器跨域读取，
-     *  浏览器直换必失败；凭据仅随请求体流转，服务端不落库。上游非 2xx 同样以异常抛出由控制器透传。 */
-    public String postOauthToken(java.util.Map<String, String> form) {
-        String body = form.entrySet().stream()
-                .map(e -> java.net.URLEncoder.encode(e.getKey(), java.nio.charset.StandardCharsets.UTF_8) + "=" +
-                        java.net.URLEncoder.encode(e.getValue() == null ? "" : e.getValue(), java.nio.charset.StandardCharsets.UTF_8))
-                .reduce((a, b) -> a + "&" + b)
-                .orElse("");
-        return exchange(rc -> rc.post()
-                .uri(java.net.URI.create("https://bgm.tv/oauth/access_token"))
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(body)
-                .retrieve()
-                .body(String.class));
     }
 
     /** 对单个文件执行匹配：返回落库用的结果 */

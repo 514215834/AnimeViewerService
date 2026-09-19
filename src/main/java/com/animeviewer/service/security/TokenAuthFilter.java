@@ -44,13 +44,6 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         if (!matches(provided)) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             response.setContentType("application/json;charset=UTF-8");
-            // v0.26 补记：401 响应补 CORS 头（本过滤器先于 DispatcherServlet，不会经过 MVC 的 CORS 处理）——
-            // 缺头时浏览器拦截响应报 "Failed to fetch"，前端把「Token 不正确」误报成「服务不可达」，误导排障
-            String origin = request.getHeader("Origin");
-            if (origin != null && !origin.isBlank()) {
-                response.setHeader("Access-Control-Allow-Origin", origin);
-                response.setHeader("Vary", "Origin");
-            }
             response.getWriter().write("{\"error\":\"unauthorized\",\"message\":\"Token 缺失或不正确\"}");
             return;
         }
