@@ -29,9 +29,14 @@ public class RangeForwarder {
     public static final long MAX_PLAYLIST_BYTES = 2 * 1024 * 1024;
 
     private final HttpClient client;
+    private final ServiceProperties props;
     private final String userAgent;
+    /** v0.26 HN3 在线视频容灾转发的粘性线路记忆（true = 上次成功走代理） */
+    private volatile boolean failoverUsedProxy = false;
+    private volatile HttpClient proxyClient;
 
     public RangeForwarder(ServiceProperties props, HttpClient client) {
+        this.props = props;
         this.client = client;
         this.userAgent = props.bangumi().userAgent();
     }
@@ -41,7 +46,7 @@ public class RangeForwarder {
 
     /**
      * @param playlistRewriter 非 null 时启用清单改写（传入「清单文本→重写文本」函数，内部逐 URI 包裹）；null 一律按流转发
-     * @param extraHeaders     附加请求头（如 WebDAV Basic 授权）；可为 null
+     * @param extraHeaders     附加请求头（如 WebDAV Basic 授权；同名覆盖内置头）；可为 null
      * @return 本次转发形态
      */
     public Outcome forward(String targetUrl,
@@ -49,15 +54,80 @@ public class RangeForwarder {
                            HttpServletResponse response,
                            UnaryOperator<String> playlistRewriter,
                            java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
+        return forwardWith(client, targetUrl, rangeHeader, response, playlistRewriter, extraHeaders);
+    }
+
+    /** v0.26 HN3 直连→代理容灾转发（仅 hanime 在线视频使用，既有 forward() 行为不变）：
+     *  线路口径对齐 ResourceService.fetchViaFailover——IOException 行级失败（DNS 污染超时/拒绝、
+     *  TLS 握手掐断、重置）切线重试一次，成功线路粘性记忆；HTTP 层非 200 原样透传给客户端（不切线）。 */
+    public Outcome forwardFailover(String targetUrl,
+                                   String rangeHeader,
+                                   HttpServletResponse response,
+                                   UnaryOperator<String> playlistRewriter,
+                                   java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
+        boolean proxyOnly = "proxy".equalsIgnoreCase(props.bangumi().proxyMode());
+        boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+        IOException last = null;
+        boolean tryProxy = failoverUsedProxy && !directOnly;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            boolean useProxy = proxyOnly || (tryProxy && !directOnly);
+            HttpClient hc = client;
+            if (useProxy) {
+                hc = proxyClient();
+                if (hc == null) {
+                    tryProxy = false;
+                    continue;
+                }
+            }
+            try {
+                Outcome out = forwardWith(hc, targetUrl, rangeHeader, response, playlistRewriter, extraHeaders);
+                failoverUsedProxy = useProxy;
+                return out;
+            } catch (IOException e) {
+                last = e;
+                log.info("在线视频{}失败（{}），切换为{}重试",
+                        useProxy ? "经代理转发" : "直连转发", e.toString(), useProxy ? "直连" : "经代理");
+                tryProxy = !useProxy;
+            }
+        }
+        throw last != null ? last : new IOException("转发失败");
+    }
+
+    /** av.bangumi 代理地址的 HttpClient（懒加载；未配置代理返回 null） */
+    private HttpClient proxyClient() {
+        if (proxyClient != null) return proxyClient;
+        String host = props.bangumi().proxyHost();
+        Integer port = props.bangumi().proxyPort();
+        if (host == null || host.isBlank() || port == null) return null;
+        synchronized (this) {
+            if (proxyClient == null) {
+                proxyClient = java.net.http.HttpClient.newBuilder()
+                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                        .connectTimeout(Duration.ofSeconds(10))
+                        .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(host, port)))
+                        .build();
+            }
+            return proxyClient;
+        }
+    }
+
+    private Outcome forwardWith(HttpClient hc,
+                                String targetUrl,
+                                String rangeHeader,
+                                HttpServletResponse response,
+                                UnaryOperator<String> playlistRewriter,
+                                java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
         HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(targetUrl))
                 .timeout(Duration.ofSeconds(60))
                 .header("User-Agent", userAgent)
                 .header("Accept", "*/*");
         boolean rangeSent = rangeHeader != null && !rangeHeader.isBlank();
         if (rangeSent) rb.header("Range", rangeHeader);
-        if (extraHeaders != null) extraHeaders.forEach(rb::header);
+        // setHeader = 同名覆盖内置头（hanime 流转发以浏览器 UA/Referer 覆盖默认 UA；
+        // 既有 WebDAV 授权单值头行为不变）
+        if (extraHeaders != null) extraHeaders.forEach(rb::setHeader);
 
-        HttpResponse<InputStream> up = client.send(rb.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<InputStream> up = hc.send(rb.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
         String contentType = up.headers().firstValue("Content-Type").orElse("");
 
         try (InputStream in = up.body()) {

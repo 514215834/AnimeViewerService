@@ -174,4 +174,50 @@ public class FilesController {
     public Map<String, List<BangumiEpisodeDto>> episodes(@PathVariable long subjectId) {
         return Map.of("list", matcher.episodes(subjectId));
     }
+
+    /* ── v0.26 补记：Bangumi GET /v0/* 只读透传——浏览器直连 api.bgm.tv 存在环境性故障
+       （预检 OPTIONS 502 / 直连超时），前端把带 Authorization 的 GET 交由服务端执行
+       （合规 UA + 直连→代理容灾）；上游状态码与 JSON 体原样回传，鉴权语义由前端解释。
+       仅放行 /v0/ 只读 GET（路径含 .. 拒绝），防目录穿越与开放代理。 ── */
+
+    @GetMapping("/bangumi/v0/**")
+    public ResponseEntity<String> bangumiV0(jakarta.servlet.http.HttpServletRequest request) {
+        String path = request.getRequestURI().substring("/api/bangumi/v0".length());
+        if (!path.startsWith("/v0/") || path.contains("../")) {
+            return ResponseEntity.badRequest().body("{\"message\":\"仅透传 /v0/ 只读端点\"}");
+        }
+        // 剥离服务自身的 token 参数再透传（实测：bgm 网关对未知 token 参数返回 502；
+        // 配对 Token 应走 X-AV-Token 头，不进入上游请求）
+        String query = request.getQueryString();
+        if (query != null) {
+            StringBuilder sb = new StringBuilder();
+            for (String pair : query.split("&")) {
+                if (pair.isBlank() || pair.equals("token") || pair.startsWith("token=")) continue;
+                if (sb.length() > 0) sb.append('&');
+                sb.append(pair);
+            }
+            query = sb.length() > 0 ? sb.toString() : null;
+        }
+        String target = path + (query != null ? "?" + query : "");
+        try {
+            String body = matcher.fetchV0(target, request.getHeader("Authorization"));
+            return ResponseEntity.ok().contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
+        } catch (org.springframework.web.client.RestClientResponseException e) {
+            return ResponseEntity.status(e.getStatusCode())
+                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                    .body(e.getResponseBodyAsString());
+        }
+    }
+
+    /** v0.26 补记：OAuth 授权码换 Token 服务端代理——bgm.tv oauth 端点的响应不允许浏览器跨域读取，
+     *  浏览器直换必失败；凭据仅随请求体流转，服务端不落库。 */
+    @PostMapping("/bangumi/oauth/token")
+    public ResponseEntity<String> oauthToken(@RequestBody Map<String, String> form) {
+        try {
+            String body = matcher.postOauthToken(form);
+            return ResponseEntity.ok().contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(body);
+        } catch (org.springframework.web.client.RestClientResponseException e) {
+            return ResponseEntity.status(e.getStatusCode()).body(e.getResponseBodyAsString());
+        }
+    }
 }

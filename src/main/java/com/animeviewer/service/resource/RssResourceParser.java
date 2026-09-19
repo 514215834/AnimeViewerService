@@ -3,12 +3,16 @@ package com.animeviewer.service.resource;
 import com.animeviewer.service.model.Dtos.ResourceItemDto;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.w3c.dom.Node;
 import org.xml.sax.InputSource;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.StringReader;
 import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -20,7 +24,17 @@ import java.util.regex.Pattern;
  *  实测 RSS 结构（2026-09-13 curl 采夹具）：标准 RSS 2.0，
  *  <item> 含 title / link（详情页）/ description（「链接 | 大小 | 分类 | infohash」管道段）/
  *  author（发布者——镜像站为「XX镜像」、本尊为发布组名）/ enclosure（url 直含完整磁力）/
- *  pubDate / category。禁 DTD/外部实体防 XXE；解析失败抛 IllegalArgumentException。 */
+ *  pubDate / category。禁 DTD/外部实体防 XXE；解析失败抛 IllegalArgumentException。
+ *
+ *  v0.24 SE1 种子型站点扩展（nyaa / 蜜柑计划夹具 2026-09-19 实测）：
+ *  <ul>
+ *    <li>nyaa：无 enclosure，<link> 即 .torrent 下载直链，nyaa:infoHash 40hex 直接构造磁力，nyaa:size（MiB）兜底；</li>
+ *    <li>蜜柑：enclosure 为 .torrent 直链 + length 真实字节（contentLength 同值），无任何 infoHash——
+ *        磁力只能在入队时抓种子计算 BTIH（BencodeParser），本解析器以 torrentUrl 承载；</li>
+ *    <li>磁力优先、torrentUrl 兜底：两者全无的条目仍跳过（对本产品无意义）；</li>
+ *    <li>元素查找统一 getElementsByTagNameNS("*", localName)——前缀无关注入（nyaa:/torrent: 命名空间均可命中），
+ *        文档序首个命中优先，acgnx 无前缀行为不变。</li>
+ *  </ul> */
 public final class RssResourceParser {
 
     private RssResourceParser() {}
@@ -51,19 +65,26 @@ public final class RssResourceParser {
                 Element item = (Element) items.item(i);
                 String title = text(item, "title");
                 String magnet = enclosureMagnet(item);
-                if (title == null || title.isBlank() || magnet == null) continue; // 无磁力的条目对本产品无意义
+                String torrentUrl = torrentUrlOf(item);
+                if (title == null || title.isBlank() || (magnet == null && torrentUrl == null)) continue; // 无磁力也无种子的条目对本产品无意义
                 String desc = text(item, "description");
                 String hash = infoHashOf(magnet, desc);
+                if (hash == null) hash = namespacedHash(item);
+                // nyaa 形态：仅 namespaced hash 无磁力——由 hash 构造磁力（tracker 由入队 mergeTrackers 注入）
+                if (hash != null && magnet == null) magnet = "magnet:?xt=urn:btih:" + hash;
+                String size = sizeOf(desc);
+                if (size == null) size = sizeFromEnclosure(item);
                 out.add(new ResourceItemDto(
                         title.trim(),
                         magnet,
                         hash,
                         siteKey,
-                        sizeOf(desc),
+                        size,
                         text(item, "category"),
                         text(item, "author"),
                         dateOf(text(item, "pubDate")),
-                        text(item, "link")));
+                        text(item, "link"),
+                        torrentUrl));
             }
             return out;
         } catch (IllegalArgumentException e) {
@@ -80,7 +101,7 @@ public final class RssResourceParser {
     }
 
     private static String enclosureMagnet(Element item) {
-        var nodes = item.getElementsByTagName("enclosure");
+        var nodes = item.getElementsByTagNameNS("*", "enclosure");
         for (int i = 0; i < nodes.getLength(); i++) {
             Element enc = (Element) nodes.item(i);
             String type = enc.getAttribute("type");
@@ -99,6 +120,46 @@ public final class RssResourceParser {
             }
         }
         return null;
+    }
+
+    /** v0.24 SE1：.torrent 下载直链提取——enclosure（torrent type 或 .torrent 路径，非磁力）优先，
+     *  <link> 路径以 .torrent 结尾兜底（nyaa 形态：<link> 即种子直链）。 */
+    private static String torrentUrlOf(Element item) {
+        var encs = item.getElementsByTagNameNS("*", "enclosure");
+        for (int i = 0; i < encs.getLength(); i++) {
+            Element enc = (Element) encs.item(i);
+            String url = enc.getAttribute("url");
+            if (url == null || url.isBlank()) continue;
+            String lower = url.toLowerCase(Locale.ROOT);
+            if (!lower.startsWith("http://") && !lower.startsWith("https://")) continue; // 磁力 enclosure 由 enclosureMagnet 消费
+            String type = enc.getAttribute("type");
+            boolean torrentType = type == null || type.isBlank() || type.toLowerCase(Locale.ROOT).contains("torrent");
+            if (torrentType || looksLikeTorrentPath(url)) return url.trim();
+        }
+        String link = text(item, "link");
+        if (link != null && looksLikeTorrentPath(link)) return link.trim();
+        return null;
+    }
+
+    /** 路径段以 .torrent 结尾（query/hash 之前，大小写不敏感；语义对齐 DownloadService.isTorrentLink） */
+    public static boolean looksLikeTorrentPath(String url) {
+        if (url == null) return false;
+        String path = url;
+        int q = path.indexOf('?');
+        if (q >= 0) path = path.substring(0, q);
+        int h = path.indexOf('#');
+        if (h >= 0) path = path.substring(0, h);
+        return path.toLowerCase(Locale.ROOT).endsWith(".torrent");
+    }
+
+    /** v0.24 SE1：任意命名空间下名为 infoHash 的元素（如 nyaa:infoHash）提取 40hex（小写归一） */
+    private static String namespacedHash(Element item) {
+        var nodes = item.getElementsByTagNameNS("*", "infoHash");
+        if (nodes.getLength() == 0) return null;
+        String t = textValue(nodes.item(0));
+        if (t == null) return null;
+        String h = t.trim().toLowerCase(Locale.ROOT);
+        return h.length() == 40 && h.chars().allMatch(c -> Character.isDigit(c) || (c >= 'a' && c <= 'f')) ? h : null;
     }
 
     /** infohash：优先磁力 xt 段（40 hex / 32 base32），否则从 description 中找 40 hex（acgnx 管道段） */
@@ -139,11 +200,62 @@ public final class RssResourceParser {
         return m.group(1) + unit;
     }
 
+    /** v0.24 SE1 size 兜底：description 管道段无值时取 enclosure length 属性 / namespaced contentLength
+     *  （蜜柑形态，真实字节）→ bytesOfSize 归一；≤1KB 视为占位垃圾值（acgnx enclosure length=1）不采用 */
+    private static String sizeFromEnclosure(Element item) {
+        long bytes = -1;
+        var encs = item.getElementsByTagNameNS("*", "enclosure");
+        for (int i = 0; i < encs.getLength(); i++) {
+            Long v = parseLong(((Element) encs.item(i)).getAttribute("length"));
+            if (v != null && v >= 1024) {
+                bytes = v;
+                break;
+            }
+        }
+        if (bytes < 0) {
+            var cls = item.getElementsByTagNameNS("*", "contentLength");
+            if (cls.getLength() > 0) {
+                Long v = parseLong(textValue(cls.item(0)));
+                if (v != null) bytes = v;
+            }
+        }
+        return bytes >= 1024 ? bytesOfSize(bytes) : null;
+    }
+
+    /** 字节 → TB/GB/MB/KB（二进制 1024 进制，一位小数去尾零；<1KB 返回 null） */
+    public static String bytesOfSize(long n) {
+        if (n < 1024) return null;
+        double tb = 1L << 40, gb = 1L << 30, mb = 1L << 20, kb = 1L << 10;
+        return n >= tb ? dec(n / tb) + "TB"
+                : n >= gb ? dec(n / gb) + "GB"
+                : n >= mb ? dec(n / mb) + "MB"
+                : dec(n / kb) + "KB";
+    }
+
+    private static String dec(double v) {
+        String s = String.format(Locale.ROOT, "%.1f", v);
+        return s.endsWith(".0") ? s.substring(0, s.length() - 2) : s;
+    }
+
+    private static Long parseLong(String s) {
+        if (s == null || s.isBlank()) return null;
+        try {
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 前缀无关取文本：getElementsByTagNameNS("*", localName) 文档序首个命中（无前缀与带前缀均命中） */
     private static String text(Element parent, String tag) {
-        var nodes = parent.getElementsByTagName(tag);
+        var nodes = parent.getElementsByTagNameNS("*", tag);
         if (nodes.getLength() == 0) return null;
+        return textValue(nodes.item(0));
+    }
+
+    private static String textValue(org.w3c.dom.Node node) {
         StringBuilder sb = new StringBuilder();
-        var children = nodes.item(0).getChildNodes();
+        var children = node.getChildNodes();
         for (int i = 0; i < children.getLength(); i++) {
             if (children.item(i).getNodeType() == org.w3c.dom.Node.TEXT_NODE
                     || children.item(i).getNodeType() == org.w3c.dom.Node.CDATA_SECTION_NODE) {
@@ -154,13 +266,26 @@ public final class RssResourceParser {
         return t.isEmpty() ? null : t;
     }
 
-    /** RFC 822 pubDate（如 Sun, 13 Sep 2026 15:37:11 +0800）宽松解析，失败返回 null */
+    /** RFC 822 pubDate（如 Sun, 13 Sep 2026 15:37:11 +0800）宽松解析；
+     *  v0.24 ISO 8601 兜底（蜜柑 torrent:pubDate 形态 2026-09-18T23:31:20.561047——无时区按北京时间解析，排序口径一致即可）；
+     *  解析失败返回 null */
     static Long dateOf(String text) {
         if (text == null) return null;
         try {
             SimpleDateFormat fmt = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.US);
             Date d = fmt.parse(text.trim());
-            return d == null ? null : d.getTime();
+            if (d != null) return d.getTime();
+        } catch (Exception ignore) {
+            // 降级 ISO 8601
+        }
+        try {
+            return OffsetDateTime.parse(text.trim()).toInstant().toEpochMilli();
+        } catch (Exception ignore) {
+            // 带毫秒/纳秒但无时区的蜜柑形态
+        }
+        try {
+            return LocalDateTime.parse(text.trim())
+                    .atZone(java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
         } catch (Exception e) {
             return null;
         }

@@ -52,7 +52,7 @@ public class SubscriptionController {
     @PutMapping("/api/subscriptions/{id}")
     public SubscriptionDto update(@PathVariable long id, @RequestBody(required = false) SubscriptionUpdateRequest req) {
         return service.update(id, req == null ? null : req.autoScore(), req == null ? null : req.minEpisode(),
-                req == null ? null : req.aiKeywords());
+                req == null ? null : req.aiKeywords(), req == null ? null : req.rssUrl());
     }
 
     @DeleteMapping("/api/subscriptions/{id}")

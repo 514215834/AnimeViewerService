@@ -91,15 +91,22 @@ public final class Dtos {
 
     /* ── v0.17 R1/R2 资源发现（RSS 站点源 + 条目找资源）── */
 
+    /** v0.24 SE1：magnet 可空（种子型站点 nyaa/蜜柑 enclosure 为 .torrent 直链，无磁力）；
+     *  torrentUrl 兜底承载种子直链，入队/订阅链路对二选一自适应（有磁力优先磁力）。 */
     public record ResourceItemDto(String title, String magnet, String infoHash, String site,
                                   String size, String category, String publisher, Long pubDate,
-                                  String link) {}
+                                  String link, String torrentUrl) {}
 
+    /** v0.24 SM5：enabled 启停（null=缺省启用，兼容旧 JSON）；写路径 saveSite 消费、listSites 回显 */
     public record ResourceSiteDto(String key, String name, String baseUrl, String searchTemplate,
-                                  boolean builtin) {}
+                                  boolean builtin, Boolean enabled) {}
 
     public record ResourceSearchDto(String keyword, List<ResourceItemDto> items,
                                     List<ResourceSiteDto> sites, String error) {}
+
+    /** v0.24 SM3 站点测试连通（不入库）：ok=false 时 error 为失败原因；samples 为解析样例（前 3 条） */
+    public record ResourceSiteTestDto(boolean ok, String error, int itemCount,
+                                      List<ResourceItemDto> samples) {}
 
     public record ResourceAddRequest(String magnet, Long subjectId, String subjectName,
                                      String subjectNameCn, Integer episodeSort) {}
@@ -110,14 +117,16 @@ public final class Dtos {
                                   boolean auto, int minEpisode, List<String> ignoredFansubs,
                                   Integer autoScore, String lastCheckError,
                                   Long lastCheckedAt, Long lastHitAt, long createdAt,
-                                  List<String> aiKeywords) {}
+                                  List<String> aiKeywords, String rssUrl) {}
 
     public record SubscriptionAddRequest(Long subjectId, String subjectName, String subjectNameCn,
                                          Integer minEpisode, Integer autoScore) {}
 
     /** 可选字段 PATCH 语义：null = 不改；autoScore 为 v0.20 匹配度阈值（0=全手动特殊值，1~100 自动入队）；
-     *  aiKeywords 为 v0.22 AI2 扩展检索词（LLM 生成缓存/人工编辑，逐词 ≤100 字符、至多 10 条） */
-    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode, List<String> aiKeywords) {}
+     *  aiKeywords 为 v0.22 AI2 扩展检索词（LLM 生成缓存/人工编辑，逐词 ≤100 字符、至多 10 条）；
+     *  rssUrl 为 v0.25 RSS 固定直链订阅源（null = 不改；空串 = 清除回关键词检索；非空 = 设置，须 http(s)://） */
+    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode, List<String> aiKeywords,
+                                            String rssUrl) {}
 
     public record SubHitDto(long id, long subjectId, String subjectName, String subjectNameCn,
                             Integer episodeSort, String title, String fansub, String magnet, String infoHash,
@@ -154,4 +163,28 @@ public final class Dtos {
 
     /** 字幕轨：index 为字幕轨序号（0 基，字幕轨内排序，非流 index）；codec/language/title 可能缺省 */
     public record SubtitleTrackDto(int index, String codec, String language, String title) {}
+
+    /* ── v0.26 HN1/HN2 hanime1.me 在线解析（配置 / 搜索 / 视频解析）── */
+
+    /** 配置回显：cookie 不回传明文（只回 hasCookie） */
+    public record HanimeConfigDto(boolean enabled, String ua, boolean hasCookie) {}
+
+    /** 配置更新：null=不改动（cookie 空串=清除） */
+    public record HanimeConfigUpdateRequest(Boolean enabled, String ua, String cookie) {}
+
+    /** 搜索结果条目：videoCode 为 watch?v= 参数（播放/绑定的稳定键）；likes/views 为站点原始文案（如 "100%" / "38.2萬次"） */
+    public record HanimeSearchItem(String videoCode, String title, String thumbnail, String duration,
+                                   String likes, String views, String brand) {}
+
+    public record HanimeSearchResult(int page, boolean hasNext, List<HanimeSearchItem> items) {}
+
+    /** 视频源：label 为分辨率显示名（如 "1080p"），url 为带签名的 mp4 直链（有时效，勿长期缓存） */
+    public record HanimeSource(String label, int res, String url) {}
+
+    /** watch 页解析结果：sources 按分辨率降序（默认取首档）；brand 缺省时从标题前缀 [组名] 提取 */
+    public record HanimeWatchDto(String videoCode, String title, String poster, String brand,
+                                 List<String> tags, List<HanimeSource> sources) {}
+
+    /** 连通测试：恒 200，ok=false 时 message 给三分类原因 */
+    public record HanimeTestDto(boolean ok, String message, int itemCount) {}
 }

@@ -165,8 +165,10 @@ public class SubscriptionService {
     }
 
     /** 可选字段更新：autoScore 自动入队阈值（v0.20 取代 auto 开关）/ minEpisode 观看基线抬升（前端上报观看进度）/
-     *  aiKeywords 扩展检索词（v0.22 AI2，前端编辑传 null=不改，传数组=全量覆盖） */
-    public SubscriptionDto update(long id, Integer autoScore, Integer minEpisode, List<String> aiKeywords) {
+     *  aiKeywords 扩展检索词（v0.22 AI2，前端编辑传 null=不改，传数组=全量覆盖）/
+     *  rssUrl 固定直链订阅源（v0.25：null=不改，空串=清除回关键词检索，非空=设置——须 http(s):// 开头） */
+    public SubscriptionDto update(long id, Integer autoScore, Integer minEpisode, List<String> aiKeywords,
+                                  String rssUrl) {
         SubscriptionRepository.SubRow sub = repo.findSub(id)
                 .orElseThrow(() -> new DownloadException(404, "订阅不存在"));
         if (autoScore != null) repo.setSubScore(id, clampScore(autoScore));
@@ -175,7 +177,23 @@ public class SubscriptionService {
             if (v >= sub.minEpisode()) repo.setSubMinEpisode(id, v);
         }
         if (aiKeywords != null) repo.setSubAiKeywords(id, toJsonKeywords(sanitizeKeywords(aiKeywords)));
+        if (rssUrl != null) {
+            String normalized = sanitizeRssUrl(rssUrl);
+            repo.setSubRssUrl(id, normalized);
+        }
         return toDto(repo.findSub(id).orElseThrow());
+    }
+
+    /** v0.25 直链 URL 净化（纯函数，JUnit 护航）：trim；空白 → null（清除）；非法前缀抛 400 */
+    static String sanitizeRssUrl(String raw) {
+        if (raw == null) return null;
+        String t = raw.trim();
+        if (t.isEmpty()) return null;
+        String lower = t.toLowerCase(Locale.ROOT);
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+            throw new DownloadException(400, "RSS 直链需以 http(s):// 开头");
+        }
+        return t;
     }
 
     private static int clampScore(Integer autoScore) {
@@ -214,19 +232,26 @@ public class SubscriptionService {
     }
 
     private int doCheck(SubscriptionRepository.SubRow sub, SubscriptionSettings settings) {
-        // v0.22 AI2 懒生成：扩展检索词从未生成过（null）且 AI 就绪 → 首轮检索前生成一次（失败置 [] 防重试循环）
-        if (sub.aiKeywordsJson() == null && ai.settings().ready()) {
-            try {
-                List<String> generated = aiKeywords(sub);
-                repo.setSubAiKeywords(sub.id(), toJsonKeywords(generated));
-                sub = repo.findSub(sub.id()).orElse(sub);
-            } catch (Exception e) {
-                log.warn("订阅 #{} AI 扩展关键词生成失败（降级原名检索）: {}", sub.id(), e.toString());
-                repo.setSubAiKeywords(sub.id(), "[]");
-                sub = repo.findSub(sub.id()).orElse(sub);
+        SearchOutcome outcome;
+        if (sub.rssUrl() != null && !sub.rssUrl().isBlank()) {
+            // v0.25 RSS 固定直链模式：直连源即权威源——跳过关键词检索与 AI 扩展词（蜜柑每番 RSS 等形态），
+            // 直链条目走同一条过滤管线（集数解析/基线/infohash 去重/字幕组/大小下限/评分落库）
+            outcome = fetchDirectFeed(sub);
+        } else {
+            // v0.22 AI2 懒生成：扩展检索词从未生成过（null）且 AI 就绪 → 首轮检索前生成一次（失败置 [] 防重试循环）
+            if (sub.aiKeywordsJson() == null && ai.settings().ready()) {
+                try {
+                    List<String> generated = aiKeywords(sub);
+                    repo.setSubAiKeywords(sub.id(), toJsonKeywords(generated));
+                    sub = repo.findSub(sub.id()).orElse(sub);
+                } catch (Exception e) {
+                    log.warn("订阅 #{} AI 扩展关键词生成失败（降级原名检索）: {}", sub.id(), e.toString());
+                    repo.setSubAiKeywords(sub.id(), "[]");
+                    sub = repo.findSub(sub.id()).orElse(sub);
+                }
             }
+            outcome = searchMerged(sub);
         }
-        SearchOutcome outcome = searchMerged(sub);
         if (outcome.error() != null) {
             // v0.20 SU8 检索失败显性化：全部关键词查询失败 → 记录最近错误（成功检索即清除）
             repo.setSubLastError(sub.id(), outcome.error());
@@ -250,8 +275,9 @@ public class SubscriptionService {
         List<Long> createdIds = new ArrayList<>();
         for (var it : outcome.items()) {
             if (created >= MAX_HITS_PER_CYCLE) break;
-            String magnet = it.magnet();
-            if (magnet == null || !magnet.startsWith("magnet:?")) continue;
+            // v0.24 SE2：磁力或 .torrent 直链均入命中（种子型站点 nyaa/蜜柑无磁力）——链接列二选一承载，入队直通种子分支
+            String uri = it.magnet() != null && !it.magnet().isBlank() ? it.magnet() : it.torrentUrl();
+            if (uri == null || uri.isBlank()) continue;
             Integer ep = SubscriptionFilter.parseEpisode(it.title());
             if (ep == null) continue; // 无集数的条目无法判新旧（剧场版/合集），不入队列
             if (ep <= threshold) continue;
@@ -275,7 +301,7 @@ public class SubscriptionService {
                     it.title(), fansub, preferred);
             long hitId = repo.insertHit(new SubscriptionRepository.HitRow(
                     0, sub.subjectId(), sub.subjectName(), sub.subjectNameCn(), ep,
-                    it.title(), fansub, magnet, it.infoHash(), it.site(), it.size(), it.pubDate(),
+                    it.title(), fansub, uri, it.infoHash(), it.site(), it.size(), it.pubDate(),
                     "pending", null, score.total(), score.detail(), System.currentTimeMillis(), null, null));
             createdIds.add(hitId);
             created++;
@@ -365,7 +391,11 @@ public class SubscriptionService {
             try {
                 var res = resources.search(kw, null);
                 for (var it : res.items()) {
-                    String key = it.infoHash() != null ? it.infoHash() : it.magnet();
+                    // v0.24 SE1 去重键扩展对齐 ResourceService.dedupe：infoHash > magnet > torrentUrl
+                    String key = it.infoHash() != null ? it.infoHash()
+                            : it.magnet() != null ? it.magnet()
+                            : it.torrentUrl();
+                    if (key == null) continue;
                     merged.merge(key, it, (a, b) -> newer(a, b));
                 }
             } catch (Exception e) {
@@ -381,6 +411,18 @@ public class SubscriptionService {
 
     /** 检索结果 + 全失败错误摘要（v0.20 SU8：null=至少一路查询成功） */
     private record SearchOutcome(List<com.animeviewer.service.model.Dtos.ResourceItemDto> items, String error) {}
+
+    /** v0.25 固定直链检索：抓订阅绑定的 RSS 直链（容灾在 ResourceService.fetchFeed）→ 复用解析归一化；
+     *  失败整轮记为 error（SU8 语义：直链模式只有一路查询） */
+    private SearchOutcome fetchDirectFeed(SubscriptionRepository.SubRow sub) {
+        try {
+            return new SearchOutcome(resources.fetchFeed(sub.rssUrl()), null);
+        } catch (Exception e) {
+            String reason = e.getMessage() == null ? e.toString() : e.getMessage();
+            log.info("订阅 #{} RSS 直链检索失败: {}", sub.id(), reason);
+            return new SearchOutcome(List.of(), "RSS 直链：" + reason);
+        }
+    }
 
     /* ── v0.22 AI1 命中语义判定 / AI2 扩展检索词 ── */
 
@@ -672,7 +714,7 @@ public class SubscriptionService {
                 s.auto(), s.minEpisode(), parseFansubs(s.ignoredFansubsJson()),
                 s.autoScore(), s.lastCheckError(),
                 s.lastCheckedAt(), s.lastHitAt(), s.createdAt(),
-                s.aiKeywordsJson() == null ? null : parseAiKeywords(s.aiKeywordsJson()));
+                s.aiKeywordsJson() == null ? null : parseAiKeywords(s.aiKeywordsJson()), s.rssUrl());
     }
 
     private static SubHitDto toHitDto(SubscriptionRepository.HitRow h) {

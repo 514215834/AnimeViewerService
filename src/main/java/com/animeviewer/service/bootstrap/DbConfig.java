@@ -183,6 +183,10 @@ public class DbConfig {
             try {
                 st.execute("ALTER TABLE subscriptions ADD COLUMN ai_keywords TEXT");
             } catch (Exception e) { /* 列已存在 */ }
+            // v0.25 RSS 固定直链订阅：订阅级直连源（蜜柑每番 RSS 等；null=关键词检索模式）
+            try {
+                st.execute("ALTER TABLE subscriptions ADD COLUMN rss_url TEXT");
+            } catch (Exception e) { /* 列已存在 */ }
         }
         return ds;
     }

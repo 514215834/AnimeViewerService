@@ -147,10 +147,19 @@ public class DownloadService {
         // 原型结论：无 tracker 磁力依赖 DHT，元数据解析极慢——配置 tracker 全部注入磁力 uri
         String taskKey;
         String displayName = magnet.displayName();
-        if (magnet.infoHash() == null && isTorrentLink(uri)) {
+        String infoHash = magnet.infoHash();
+        if (infoHash == null && isTorrentLink(uri)) {
             // .torrent 直链：服务端抓取种子内容入队（文件清单立即可知，无二段 gid）
             byte[] torrent = fetchTorrent(uri);
-            taskKey = enqueueTorrent(engine, torrent, null, info.downloadDir());
+            // v0.24 SE2：入队时由种子内容计算 BTIH 回填——种子任务获得跨轮 infoHash 去重与 qBt 直开任务键
+            infoHash = BencodeParser.infoHashHex(torrent);
+            if (infoHash != null) {
+                String hash = infoHash;
+                repo.findByInfohash(infoHash).ifPresent(t -> {
+                    throw new DownloadException(409, "该资源已在任务列表（任务 #" + t.id() + " " + statusLabel(t.status()) + "）");
+                });
+            }
+            taskKey = enqueueTorrent(engine, torrent, infoHash, info.downloadDir());
             displayName = null;
         } else {
             String finalUri = MagnetParser.mergeTrackers(uri, settings.trackers());
@@ -164,7 +173,7 @@ public class DownloadService {
         }
         boolean externalHandoff = engine instanceof ExternalAppAdapter;
         long id = repo.insert(new DownloadRepository.TaskRow(
-                0, taskKey, magnet.infoHash(), displayName, uri,
+                0, taskKey, infoHash, displayName, uri,
                 req.subjectId(), req.subjectName(), req.subjectNameCn(), req.episodeSort(),
                 externalHandoff ? "external" : "queued", 0, 0, 0, 0, 0, 0, null, null, 0, false,
                 System.currentTimeMillis(), null));
@@ -484,27 +493,67 @@ public class DownloadService {
     private static final java.net.http.HttpClient FETCH_HTTP = java.net.http.HttpClient.newBuilder()
             .followRedirects(java.net.http.HttpClient.Redirect.NORMAL).build();
 
-    /** 服务端抓取 .torrent 内容（≤10MB；首字节须为 bencode dict 'd'） */
-    private static byte[] fetchTorrent(String uri) {
-        try {
-            var req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(uri))
-                    .timeout(java.time.Duration.ofSeconds(15)).GET().build();
-            var res = FETCH_HTTP.send(req, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
-            if (res.statusCode() != 200) {
-                throw new DownloadException(400, "种子链接返回 HTTP " + res.statusCode());
+    /** v0.24 SE2 种子抓取容灾（对齐 ResourceService.fetchViaFailover 同款模式，无粘性记忆——入队一次性）：
+     *  直连失败（DNS 污染连接级异常，含 TLS 握手被掐断）自动经代理重试一次；proxy-mode=direct 时不走代理。 */
+    private byte[] fetchTorrent(String uri) {
+        Exception lastError = null;
+        boolean tryProxy = false;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+            boolean useProxy = !directOnly && tryProxy;
+            if (useProxy && torrentProxyClient() == null) {
+                tryProxy = false;
+                continue;
             }
-            byte[] body = res.body();
-            if (body.length == 0 || body.length > 10 * 1024 * 1024) {
-                throw new DownloadException(400, "种子文件大小超出范围（0~10MB）");
+            try {
+                java.net.http.HttpClient hc = useProxy ? torrentProxyClient() : FETCH_HTTP;
+                var req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(uri))
+                        .timeout(java.time.Duration.ofSeconds(15)).GET().build();
+                var res = hc.send(req, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+                if (res.statusCode() != 200) {
+                    throw new DownloadException(400, "种子链接返回 HTTP " + res.statusCode());
+                }
+                byte[] body = res.body();
+                if (body.length == 0 || body.length > 10 * 1024 * 1024) {
+                    throw new DownloadException(400, "种子文件大小超出范围（0~10MB）");
+                }
+                if (body[0] != 'd') {
+                    throw new DownloadException(400, "链接内容不是有效的 .torrent 种子文件（非 bencode）");
+                }
+                return body;
+            } catch (java.io.IOException e) {
+                // 行级失败切线重试一次（DNS 污染连接拒绝/超时/TLS 握手被掐断——nyaa 种子直链实测 2026-09-19）
+                lastError = e;
+                log.info("种子抓取{}失败（{}），切换为{}重试", useProxy ? "经代理" : "直连",
+                        e.toString(), useProxy ? "直连" : "经代理");
+                tryProxy = !useProxy;
+            } catch (DownloadException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new DownloadException(400, "种子链接抓取失败: " + e.getMessage());
             }
-            if (body[0] != 'd') {
-                throw new DownloadException(400, "链接内容不是有效的 .torrent 种子文件（非 bencode）");
+        }
+        throw new DownloadException(400, "种子链接抓取失败: "
+                + (lastError == null ? "未知错误" : lastError.getMessage() == null ? lastError.toString() : lastError.getMessage()));
+    }
+
+    /** av.bangumi 代理地址的 HttpClient（懒加载，复用服务代理配置；未配置返回 null） */
+    private volatile java.net.http.HttpClient torrentProxyClient;
+
+    private java.net.http.HttpClient torrentProxyClient() {
+        if (torrentProxyClient != null) return torrentProxyClient;
+        String host = props.bangumi().proxyHost();
+        Integer port = props.bangumi().proxyPort();
+        if (host == null || host.isBlank() || port == null) return null;
+        synchronized (this) {
+            if (torrentProxyClient == null) {
+                torrentProxyClient = java.net.http.HttpClient.newBuilder()
+                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                        .connectTimeout(java.time.Duration.ofSeconds(10))
+                        .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(host, port)))
+                        .build();
             }
-            return body;
-        } catch (DownloadException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new DownloadException(400, "种子链接抓取失败: " + e.getMessage());
+            return torrentProxyClient;
         }
     }
 

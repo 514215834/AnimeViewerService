@@ -5,6 +5,7 @@ import com.animeviewer.service.model.Dtos.DownloadTaskDto;
 import com.animeviewer.service.model.Dtos.ResourceAddRequest;
 import com.animeviewer.service.model.Dtos.ResourceSearchDto;
 import com.animeviewer.service.model.Dtos.ResourceSiteDto;
+import com.animeviewer.service.model.Dtos.ResourceSiteTestDto;
 import com.animeviewer.service.resource.ResourceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -47,6 +48,12 @@ public class ResourceController {
     public Map<String, List<ResourceSiteDto>> saveSite(@RequestBody ResourceSiteDto site) {
         service.saveSite(site);
         return Map.of("sites", service.listSites());
+    }
+
+    /** v0.24 SM3 站点测试连通（不入库）：抓取 + 解析 → ok/条目数/前 3 条样例，失败原因透传（恒 200） */
+    @PostMapping("/sites/test")
+    public ResourceSiteTestDto testSite(@RequestBody ResourceSiteDto site) {
+        return service.testSite(site.baseUrl(), site.searchTemplate(), null);
     }
 
     @DeleteMapping("/sites/{key}")
