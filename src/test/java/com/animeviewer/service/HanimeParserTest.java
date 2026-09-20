@@ -1,11 +1,14 @@
 package com.animeviewer.service.hanime;
 
+import com.animeviewer.service.model.Dtos.HanimePlaylist;
+import com.animeviewer.service.model.Dtos.HanimePlaylistItem;
 import com.animeviewer.service.model.Dtos.HanimeSearchItem;
 import com.animeviewer.service.model.Dtos.HanimeSearchResult;
 import com.animeviewer.service.model.Dtos.HanimeWatchDto;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -150,6 +153,84 @@ class HanimeParserTest {
         assertEquals("无源视频", d.title());
         assertTrue(d.sources().isEmpty());
         assertTrue(d.brand().isEmpty());
+        assertTrue(d.playlist() == null);
+    }
+
+    /* v0.27 A2 真实侧栏播放列表裁剪（watch/408286 社團形态）：顶部块（社團 + 上传者链接 + 计数）
+       + 三个条目（首个 = 当前播放条目带 videos-scroll 类；末条缺 data-href 走 h4 a href 兜底） */
+    private static final String PLAYLIST_HTML = """
+            <div class="video-playlist-wrapper">
+            <div id="playlist-top-block" class="single-icon-wrapper video-playlist-top">
+            <h4 style="font-weight: bold;">
+            <span style="font-size: 12px; color: #aaa;">社團</span>
+            <a href="https://hanime1.com/user/644581/uploaded" style="color: white;">Anryms4c41</a>
+            </h4>
+            <div style="font-size: 12px; color: #aaa;">
+            <a href="https://hanime1.com/user/644581">Anryms4c41</a>
+            <span style="font-size: 10px;">&bull;</span>
+            <span style="flex-shrink: 0;">52 部影片</span>
+            </div>
+            </div>
+            <div class="playlist-hover-wrap clickable-row videos-scroll" data-href="https://hanime1.com/watch?v=408286">
+            <div class="playlist-video-card video-item-container no-select">
+            <div class="video-thumb-container horizontal-card">
+            <div class="thumb-container">
+            <a href="https://hanime1.com/watch?v=408286">
+            <img class="main-thumb" src="https://vdownload.hembed.com/image/thumbnail/408286l.jpg?secure=aaa==,1792031639" loading="lazy">
+            <div class="duration">08:41</div>
+            </a>
+            </div>
+            </div>
+            <div class="video-info-container">
+            <h4 class="video-title"><a href="https://hanime1.com/watch?v=408286">Navia Screwed【GI】</a></h4>
+            <div class="video-meta-data"><div class="meta-author"><a href="https://hanime1.com/search?query=Anryms4c41">Anryms4c41</a></div></div>
+            </div>
+            </div>
+            </div>
+            <div class="playlist-hover-wrap clickable-row" data-href="https://hanime1.com/watch?v=407784">
+            <div class="playlist-video-card video-item-container no-select">
+            <div class="video-thumb-container horizontal-card">
+            <div class="thumb-container">
+            <a href="https://hanime1.com/watch?v=407784">
+            <img class="main-thumb" src="https://vdownload.hembed.com/image/thumbnail/407784l.jpg?secure=bbb==,1792031639" loading="lazy">
+            <div class="duration">07:07</div>
+            </a>
+            </div>
+            </div>
+            <div class="video-info-container">
+            <h4 class="video-title"><a href="https://hanime1.com/watch?v=407784">(07:06) 娅佐夫 Le Cadeau</a></h4>
+            </div>
+            </div>
+            </div>
+            <div class="playlist-hover-wrap clickable-row">
+            <div class="playlist-video-card video-item-container no-select">
+            <div class="video-info-container">
+            <h4 class="video-title"><a href="https://hanime1.com/watch?v=406892">缺 data-href 条目</a></h4>
+            </div>
+            </div>
+            </div>
+            </div>
+            """;
+
+    @Test
+    void watchParse_playlistSeriesAndCurrentMarker() {
+        HanimeWatchDto d = HanimeParser.parseWatch(WATCH_HTML + PLAYLIST_HTML, "408286");
+        HanimePlaylist p = d.playlist();
+        assertEquals("社團", p.category());
+        assertEquals("Anryms4c41", p.name());
+        assertEquals(52, p.total());
+        assertEquals(3, p.items().size());
+        // 首个 = 当前播放条目（videos-scroll 类）→ current=true，其余 false
+        HanimePlaylistItem cur = p.items().get(0);
+        assertEquals("408286", cur.videoCode());
+        assertEquals("Navia Screwed【GI】", cur.title());
+        assertEquals("08:41", cur.duration());
+        assertTrue(cur.thumbnail().contains("thumbnail/408286l.jpg"));
+        assertTrue(cur.current());
+        assertFalse(p.items().get(1).current());
+        assertEquals("407784", p.items().get(1).videoCode());
+        // 缺 data-href 的条目走 h4.video-title a[href] 兜底
+        assertEquals("406892", p.items().get(2).videoCode());
     }
 
     @Test

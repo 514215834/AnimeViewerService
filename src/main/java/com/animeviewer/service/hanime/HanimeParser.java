@@ -1,5 +1,7 @@
 package com.animeviewer.service.hanime;
 
+import com.animeviewer.service.model.Dtos.HanimePlaylist;
+import com.animeviewer.service.model.Dtos.HanimePlaylistItem;
 import com.animeviewer.service.model.Dtos.HanimeSearchItem;
 import com.animeviewer.service.model.Dtos.HanimeSearchResult;
 import com.animeviewer.service.model.Dtos.HanimeSource;
@@ -98,7 +100,52 @@ public final class HanimeParser {
             if (!tag.isBlank() && !tags.contains(tag)) tags.add(tag);
         }
         String brand = extractFansub(title);
-        return new HanimeWatchDto(videoCode, title, poster, brand, tags, sources);
+        return new HanimeWatchDto(videoCode, title, poster, brand, tags, sources, parsePlaylist(doc));
+    }
+
+    /** v0.27 A2 侧栏播放列表（系列/社团合集）解析：
+     *  站点无独立「系列」区块——watch 页右栏 .video-playlist-wrapper 统一承载（顶部块 #playlist-top-block
+     *  的分类 span 文案「社團/系列」+ h4 内归属链接名 + 计数「N 部影片」；条目 div.playlist-hover-wrap
+     *  [data-href=watch?v=code]，h4.video-title a 标题 + .duration 时长 + img.main-thumb 缩略图，
+     *  当前播放条目 wrap 带 videos-scroll 类）。条目按 DOM 顺序原样返回（站点即播放顺序），码去重；
+     *  顶部块/条目缺失（无侧栏）返回 null。 */
+    static HanimePlaylist parsePlaylist(Document doc) {
+        List<HanimePlaylistItem> items = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Element wrap : doc.select("div.playlist-hover-wrap")) {
+            String href = wrap.attr("data-href");
+            if (href.isBlank()) {
+                Element a = wrap.selectFirst("h4.video-title a");
+                href = a == null ? "" : a.attr("href");
+            }
+            String code = videoCodeOf(href);
+            if (code == null || !seen.add(code)) continue;
+            String title = text(wrap.selectFirst("h4.video-title a"));
+            if (title.isBlank()) continue;
+            String thumbnail = "";
+            Element img = wrap.selectFirst("img.main-thumb");
+            if (img != null) thumbnail = img.attr("src").trim();
+            items.add(new HanimePlaylistItem(code, title, thumbnail, text(wrap.selectFirst(".duration")),
+                    wrap.hasClass("videos-scroll")));
+        }
+        if (items.isEmpty()) return null;
+        String category = "";
+        String name = "";
+        int total = 0;
+        Element top = doc.selectFirst("#playlist-top-block");
+        if (top != null) {
+            category = text(top.selectFirst("h4 > span"));
+            Element nameLink = top.selectFirst("h4 a");
+            if (nameLink != null) name = nameLink.text().trim();
+            for (Element span : top.select("span")) {
+                String t = span.ownText().trim();
+                if (t.contains("部影片")) {
+                    var m = java.util.regex.Pattern.compile("(\\d+)").matcher(t);
+                    if (m.find()) total = Integer.parseInt(m.group(1));
+                }
+            }
+        }
+        return new HanimePlaylist(category, name, total, items);
     }
 
     static String extractFansub(String title) {

@@ -181,9 +181,18 @@ public final class Dtos {
     /** 视频源：label 为分辨率显示名（如 "1080p"），url 为带签名的 mp4 直链（有时效，勿长期缓存） */
     public record HanimeSource(String label, int res, String url) {}
 
-    /** watch 页解析结果：sources 按分辨率降序（默认取首档）；brand 缺省时从标题前缀 [组名] 提取 */
+    /** v0.27 A2 系列合集条目（watch 页侧栏播放列表项）：current=当前播放条目（前端高亮） */
+    public record HanimePlaylistItem(String videoCode, String title, String thumbnail, String duration,
+                                     boolean current) {}
+
+    /** 侧栏播放列表（站点以「社團/系列」二态承载系列合集）：category 为顶部块分类文案（社團/系列），
+     *  name 为列表归属名（上传者名等），total 为站点计数的影片数；无播放列表时为 null */
+    public record HanimePlaylist(String category, String name, int total, List<HanimePlaylistItem> items) {}
+
+    /** watch 页解析结果：sources 按分辨率降序（默认取首档）；brand 缺省时从标题前缀 [组名] 提取；
+     *  playlist 为侧栏系列/社团合集（v0.27 A2，无侧栏时 null） */
     public record HanimeWatchDto(String videoCode, String title, String poster, String brand,
-                                 List<String> tags, List<HanimeSource> sources) {}
+                                 List<String> tags, List<HanimeSource> sources, HanimePlaylist playlist) {}
 
     /** 连通测试：恒 200，ok=false 时 message 给三分类原因 */
     public record HanimeTestDto(boolean ok, String message, int itemCount) {}
