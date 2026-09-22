@@ -17,7 +17,8 @@ public record ServiceProperties(
         Webdav webdav,
         Aria2 aria2,
         Subscription subscription,
-        Ai ai
+        Ai ai,
+        Stream stream
 ) {
     public record Bangumi(String baseUrl, String userAgent, long matchThrottleMs,
                           String proxyHost, Integer proxyPort, String proxyMode) {}
@@ -25,6 +26,13 @@ public record ServiceProperties(
     public record Scan(boolean autoOnStart, int probeTimeoutSeconds) {}
 
     public record Remux(int maxConcurrent) {}
+
+    /**
+     * v0.28 P3/P1 流端点并发闸：hanimeMaxConcurrent 在线流转发并发上限（§5O A4 技术债销账，
+     * 超限等待 10s 后 503）；transcodeMaxConcurrent 实时转码并发上限（转码会话分钟级长驻、
+     * CPU 重负载，超限即时拒绝 503——与 remux 短会话 10s 排队语义不同）。
+     */
+    public record Stream(Integer hanimeMaxConcurrent, Integer transcodeMaxConcurrent) {}
 
     /** v0.15 O2 流代理：allowedHosts 域名白名单（空 = 代理禁用，返回 403）；maxConcurrent 并发上限（超限 503） */
     public record Proxy(List<String> allowedHosts, Integer maxConcurrent) {}
@@ -80,5 +88,6 @@ public record ServiceProperties(
                 List.of(), true, 0, false);
         if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true, 0, "", null);
         if (ai == null) ai = new Ai(false, "https://api.openai.com/v1", "", "", 30, 60, false, "");
+        if (stream == null) stream = new Stream(2, 1);
     }
 }

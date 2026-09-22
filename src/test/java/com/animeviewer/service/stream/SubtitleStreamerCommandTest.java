@@ -12,7 +12,7 @@ class SubtitleStreamerCommandTest {
 
     @Test
     void 命令形态_ffmpeg路径_按字幕轨序号map() {
-        SubtitleStreamer s = new SubtitleStreamer(new ServiceProperties(null, "ffmpeg", "ffprobe", null, null, null, null, null, null, null, null));
+        SubtitleStreamer s = new SubtitleStreamer(new ServiceProperties(null, "ffmpeg", "ffprobe", null, null, null, null, null, null, null, null, null));
         String[] cmd = s.buildCommand("G:/media/ep01.mkv", 1);
         assertEquals(
                 "[ffmpeg, -hide_banner, -loglevel, error, -i, G:/media/ep01.mkv, -map, 0:s:1, -f, webvtt, pipe:1]",
@@ -21,7 +21,7 @@ class SubtitleStreamerCommandTest {
 
     @Test
     void 首轨序号0_map0s0() {
-        SubtitleStreamer s = new SubtitleStreamer(new ServiceProperties(null, "ffmpeg", "ffprobe", null, null, null, null, null, null, null, null));
+        SubtitleStreamer s = new SubtitleStreamer(new ServiceProperties(null, "ffmpeg", "ffprobe", null, null, null, null, null, null, null, null, null));
         String[] cmd = s.buildCommand("G:/media/ep01.mkv", 0);
         assertEquals("0:s:0", cmd[7]);
     }

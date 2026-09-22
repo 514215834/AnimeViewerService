@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** v0.22 AI0 设置纯函数：KV JSON 往返 / 校验 / ready 判定（对齐 SubscriptionSettings 测试惯例）。 */
 class AiSettingsTest {
 
-    private static final ServiceProperties NULL_PROPS = new ServiceProperties(null, null, null, null, null, null, null, null, null, null, null);
+    private static final ServiceProperties NULL_PROPS = new ServiceProperties(null, null, null, null, null, null, null, null, null, null, null, null);
 
     @Test
     void defaultsAreDisabled() {

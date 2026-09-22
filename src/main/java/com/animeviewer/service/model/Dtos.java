@@ -164,6 +164,15 @@ public final class Dtos {
     /** 字幕轨：index 为字幕轨序号（0 基，字幕轨内排序，非流 index）；codec/language/title 可能缺省 */
     public record SubtitleTrackDto(int index, String codec, String language, String title) {}
 
+    /* ── v0.28 P2 多音轨与章节 ── */
+
+    /** 音轨：index 为音轨序号（0 基，codec_type=audio 出现顺序——与 -map 0:a:N 同口径，非流 index）；
+     *  codec/channels/language/title 可能缺省 */
+    public record AudioTrackDto(int index, String codec, Integer channels, String language, String title) {}
+
+    /** 章节：start/end 为文件绝对秒；title 可能缺省（ffprobe -show_chapters） */
+    public record ChapterDto(double start, double end, String title) {}
+
     /* ── v0.26 HN1/HN2 hanime1.me 在线解析（配置 / 搜索 / 视频解析）── */
 
     /** 配置回显：cookie 不回传明文（只回 hasCookie） */

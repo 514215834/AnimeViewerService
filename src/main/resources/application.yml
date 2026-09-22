@@ -2,6 +2,9 @@ server:
   # S1：默认仅绑定本机回环；局域网监听需显式改为 0.0.0.0（启动参数 --server.address=0.0.0.0）
   port: 8787
   address: 127.0.0.1
+  error:
+    # v0.28：sendError(503/4xx, 可读文案) 的 message 对外可见（转码/转封装并发闸文案前端可读）
+    include-message: always
 
 spring:
   application:
@@ -32,6 +35,11 @@ av:
   remux:
     # 同时进行的 ffmpeg 转封装进程上限
     max-concurrent: 3
+  stream:
+    # v0.28 P3：在线流转发（hanime stream）并发上限（超限等待 10s 后 503）
+    hanime-max-concurrent: 2
+    # v0.28 P1：实时转码并发上限（转码会话分钟级长驻，超限即时拒绝 503）
+    transcode-max-concurrent: 1
   proxy:
     # v0.15 流代理域名白名单（逗号分隔，支持 *.example.com 通配子域）；默认空 = 代理禁用（请求返回 403）。
     # 仅代理用户在前端手动添加的源——示例: allowed-hosts: "cdn.example.com,*.another-cdn.net"

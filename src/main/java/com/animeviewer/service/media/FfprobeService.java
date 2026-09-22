@@ -1,6 +1,8 @@
 package com.animeviewer.service.media;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.model.Dtos.AudioTrackDto;
+import com.animeviewer.service.model.Dtos.ChapterDto;
 import com.animeviewer.service.model.Dtos.SubtitleTrackDto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -144,5 +146,130 @@ public class FfprobeService {
             return List.of();
         }
         return out;
+    }
+
+    /* ── v0.28 P2 多音轨与章节 ── */
+
+    /** 枚举音轨（-select_streams a）：失败返回空列表并记录 debug（单音轨/无音轨是常态）。 */
+    public List<AudioTrackDto> audios(String path) {
+        String stdout = selectStreamsJson(path, "a");
+        if (stdout == null) return List.of();
+        return parseAudioTracks(stdout);
+    }
+
+    /** 解析 -select_streams a 输出（包级可见纯函数，供单测）：
+     *  只收 codec_type=audio 的流；index 为音轨序号（按出现顺序 0 基——与 -map 0:a:N 同口径），
+     *  channels/language/title 可缺省（如实为 null）。 */
+    List<AudioTrackDto> parseAudioTracks(String stdout) {
+        var out = new ArrayList<AudioTrackDto>();
+        try {
+            JsonNode root = mapper.readTree(stdout);
+            for (JsonNode s : root.path("streams")) {
+                if (!"audio".equals(s.path("codec_type").asText(""))) continue;
+                JsonNode tags = s.path("tags");
+                String lang = tags.path("language").isMissingNode() || tags.path("language").isNull()
+                        ? null : tags.path("language").asText();
+                String title = tags.path("title").isMissingNode() || tags.path("title").isNull()
+                        ? null : tags.path("title").asText();
+                Integer channels = s.path("channels").isInt() ? s.path("channels").asInt() : null;
+                out.add(new AudioTrackDto(out.size(), s.path("codec_name").asText(null), channels, lang, title));
+            }
+        } catch (Exception e) {
+            log.debug("音轨解析失败: {}", e.toString());
+            return List.of();
+        }
+        return out;
+    }
+
+    /** 枚举章节（-show_chapters）：失败返回空列表并记录 debug（无章节是常态）。 */
+    public List<ChapterDto> chapters(String path) {
+        try {
+            var pb = new ProcessBuilder(
+                    props.ffprobePath(), "-v", "error",
+                    "-print_format", "json",
+                    "-show_chapters",
+                    path);
+            pb.redirectErrorStream(false);
+            var proc = pb.start();
+            String stdout;
+            try (var in = proc.getInputStream()) {
+                stdout = new String(in.readAllBytes());
+            }
+            boolean finished = proc.waitFor(Math.max(5, props.scan().probeTimeoutSeconds()), TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return List.of();
+            }
+            if (proc.exitValue() != 0) {
+                log.debug("章节枚举失败: {} tail={}", path, trimErr(new String(proc.getErrorStream().readAllBytes())));
+                return List.of();
+            }
+            return parseChapters(stdout);
+        } catch (Exception e) {
+            log.warn("章节枚举失败: {} ({})", path, e.toString());
+            return List.of();
+        }
+    }
+
+    /** 解析 -show_chapters 输出（包级可见纯函数，供单测）：
+     *  start_time/end_time 为秒（字符串形态）；title 可缺省；start > end 的脏数据跳过。 */
+    List<ChapterDto> parseChapters(String stdout) {
+        var out = new ArrayList<ChapterDto>();
+        try {
+            JsonNode root = mapper.readTree(stdout);
+            for (JsonNode c : root.path("chapters")) {
+                double start = parseSeconds(c.path("start_time").asText(null));
+                double end = parseSeconds(c.path("end_time").asText(null));
+                if (start < 0 || end <= start) continue;
+                JsonNode tags = c.path("tags");
+                String title = tags.path("title").isMissingNode() || tags.path("title").isNull()
+                        ? null : tags.path("title").asText();
+                out.add(new ChapterDto(start, end, title));
+            }
+        } catch (Exception e) {
+            log.debug("章节解析失败: {}", e.toString());
+            return List.of();
+        }
+        return out;
+    }
+
+    private static double parseSeconds(String v) {
+        if (v == null || v.isBlank()) return -1;
+        try {
+            return Double.parseDouble(v);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /** -select_streams 枚举公共执行体（audios 复用）；失败返回 null */
+    private String selectStreamsJson(String path, String streamType) {
+        try {
+            var pb = new ProcessBuilder(
+                    props.ffprobePath(), "-v", "error",
+                    "-print_format", "json",
+                    "-select_streams", streamType,
+                    "-show_streams",
+                    path);
+            pb.redirectErrorStream(false);
+            var proc = pb.start();
+            String stdout;
+            try (var in = proc.getInputStream()) {
+                stdout = new String(in.readAllBytes());
+            }
+            boolean finished = proc.waitFor(Math.max(5, props.scan().probeTimeoutSeconds()), TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return null;
+            }
+            if (proc.exitValue() != 0) {
+                log.debug("音轨枚举失败: {} tail={}", path, trimErr(new String(proc.getErrorStream().readAllBytes())));
+                return null;
+            }
+            return stdout;
+        } catch (Exception e) {
+            log.warn("音轨枚举失败: {} ({})", path, e.toString());
+            return null;
+        }
     }
 }
