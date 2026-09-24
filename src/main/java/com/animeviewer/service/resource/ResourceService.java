@@ -1,11 +1,15 @@
 package com.animeviewer.service.resource;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.ai.AiPrompts;
+import com.animeviewer.service.ai.AiService;
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadRepository;
 import com.animeviewer.service.download.DownloadService;
 import com.animeviewer.service.download.MagnetParser;
+import com.animeviewer.service.model.Dtos.AiSiteFillDto;
 import com.animeviewer.service.model.Dtos.DownloadAddRequest;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.animeviewer.service.model.Dtos.DownloadTaskDto;
 import com.animeviewer.service.model.Dtos.ResourceAddRequest;
 import com.animeviewer.service.model.Dtos.ResourceItemDto;
@@ -66,6 +70,8 @@ public class ResourceService {
     private final DownloadService downloads;
     private final ServiceProperties props;
     private final HttpClient client;
+    /** v0.30 补记一：站点配置 AI 解析（aiFillSite LLM 兜底用） */
+    private final AiService ai;
     /** 代理线路（懒加载；acgnx 实测 DNS 污染直连超时——探测定案：抓取走直连/代理自动容灾） */
     private volatile HttpClient proxyClient;
 
@@ -75,11 +81,46 @@ public class ResourceService {
     private record CacheEntry(List<ResourceItemDto> items, long at) {}
 
     public ResourceService(DownloadRepository repo, DownloadService downloads,
-                           ServiceProperties props, HttpClient client) {
+                           ServiceProperties props, HttpClient client, AiService ai) {
         this.repo = repo;
         this.downloads = downloads;
         this.props = props;
         this.client = client;
+        this.ai = ai;
+    }
+
+    /* ── v0.30 补记一：AI 解析站点接入配置（站点管理「AI 解析」按钮）── */
+
+    /** SiteFiller 规则映射先行（不需 AI 就绪），规则推不出再走 LLM 兜底（拒绝编造，推不出给 reason）。
+     *  结果仅预填表单，测试连通与保存仍人工把关（人工把关不变式）。 */
+    public AiSiteFillDto aiFillSite(String text) {
+        SiteFiller.Fill rule = SiteFiller.guess(text);
+        if (rule != null) {
+            return new AiSiteFillDto("rule", rule.key(), rule.name(), rule.baseUrl(), rule.searchTemplate(),
+                    "已从地址推导站点配置（规则映射，测试连通后保存）");
+        }
+        if (!ai.settings().ready()) {
+            throw new DownloadException(400, "规则未命中，且 AI 未启用或未配置（设置页「AI 分析」填写接口地址与模型）");
+        }
+        JsonNode node = ai.askJson(AiPrompts.siteFillSystem(), AiPrompts.siteFillUser(text));
+        if (node == null || !node.isObject()) {
+            return new AiSiteFillDto("none", null, null, null, null, "AI 解析失败（服务不可用或返回格式异常）");
+        }
+        String baseUrl = node.path("baseUrl").isTextual() ? node.path("baseUrl").asText("").trim() : "";
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) baseUrl = "";
+        String template = node.path("searchTemplate").isTextual() ? node.path("searchTemplate").asText("").trim() : "";
+        boolean templateLooksFeedish = template.contains("rss") || template.contains("feed")
+                || template.toLowerCase(Locale.ROOT).contains("page=rss");
+        if (baseUrl.isEmpty() || template.isEmpty() || !template.contains("{kw}") || !templateLooksFeedish) {
+            String reason = node.path("reason").isTextual() ? node.path("reason").asText("").trim() : "";
+            return new AiSiteFillDto("none", null, null, null, null,
+                    "无法解析出站点配置" + (reason.isBlank() ? "" : "：" + reason));
+        }
+        String key = node.path("key").isTextual() ? node.path("key").asText("").trim().toLowerCase(Locale.ROOT) : "";
+        String host = com.animeviewer.service.resource.SiteFiller.safeHost(baseUrl);
+        key = key.matches("[a-z0-9_-]{1,24}") ? key : SiteFiller.deriveKey(host);
+        String name = node.path("name").isTextual() ? node.path("name").asText("").trim() : "";
+        return new AiSiteFillDto("ai", key, name, baseUrl, template, "AI 已从地址推导站点配置（建议测试连通后保存）");
     }
 
     /* ── 站点管理 ── */

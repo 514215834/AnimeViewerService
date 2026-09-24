@@ -162,6 +162,14 @@ public final class Dtos {
     /** AI3 文件名语义解析结果（LLM 判定 → 落 pending 待人工复核） */
     public record FileAnalyzeDto(String title, Integer episode) {}
 
+    /* ── v0.30 补记一 站点配置 AI 解析（站点管理「AI 解析」按钮，结果仅预填人工把关）── */
+
+    /** source: rule=已知站点规则映射（不需 AI）/ ai=LLM 兜底 / none=推不出（message 给原因） */
+    public record AiSiteFillDto(String source, String key, String name, String baseUrl,
+                                String searchTemplate, String message) {}
+
+    public record AiSiteFillRequest(String text) {}
+
     /* ── v0.30 A6 订阅地址 AI 解析（规则映射 + LLM 兜底，结果仅预填人工保存）── */
 
     /** source: rule=站点形态规则映射（不需 AI）/ ai=LLM 兜底 / none=推不出（message 给原因） */

@@ -1,6 +1,8 @@
 package com.animeviewer.service.api;
 
 import com.animeviewer.service.download.DownloadException;
+import com.animeviewer.service.model.Dtos.AiSiteFillDto;
+import com.animeviewer.service.model.Dtos.AiSiteFillRequest;
 import com.animeviewer.service.model.Dtos.DownloadTaskDto;
 import com.animeviewer.service.model.Dtos.ResourceAddRequest;
 import com.animeviewer.service.model.Dtos.ResourceSearchDto;
@@ -54,6 +56,15 @@ public class ResourceController {
     @PostMapping("/sites/test")
     public ResourceSiteTestDto testSite(@RequestBody ResourceSiteDto site) {
         return service.testSite(site.baseUrl(), site.searchTemplate(), null);
+    }
+
+    /** v0.30 补记一：AI 解析站点接入配置（站点管理「AI 解析」按钮——规则映射优先 + LLM 兜底，结果仅预填人工把关） */
+    @PostMapping("/sites/ai-fill")
+    public AiSiteFillDto aiFillSite(@RequestBody(required = false) AiSiteFillRequest req) {
+        if (req == null || req.text() == null || req.text().isBlank()) {
+            throw new DownloadException(400, "请先粘贴站点地址");
+        }
+        return service.aiFillSite(req.text());
     }
 
     @DeleteMapping("/sites/{key}")

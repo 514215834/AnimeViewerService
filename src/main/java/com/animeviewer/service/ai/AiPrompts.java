@@ -103,6 +103,28 @@ public final class AiPrompts {
                 + "\n请输出解析 JSON。";
     }
 
+    /** v0.30 补记一：从站点地址推导「key + 名称 + baseUrl + 关键词搜索模板」（规则映射先行，此处仅兜底未知站点） */
+    public static String siteFillSystem() {
+        return """
+                你是 RSS 资源站接入配置生成器。根据用户粘贴的站点地址/文本，推导该站的「关键词搜索 RSS 模板」\
+                ——在 baseUrl 后拼接模板即得到按关键词搜索结果的 RSS feed 地址（XML，不是网页）。\
+                只输出一个 JSON 对象，不要任何多余文字：
+                {"key":"1~24位小写字母数字连字符下划线","name":"站点显示名","baseUrl":"https://根地址","searchTemplate":"含 {kw} 占位符的搜索模板（相对 baseUrl，不带前导斜杠）"}
+                或解析不出：{"key":null,"reason":"不超过40字"}
+                规则：
+                - searchTemplate 形如 rss.xml?keyword={kw}、topics/rss/rss.xml?keyword={kw}、?page=rss&q={kw}&c=0_0&f=0
+                - 知道该站搜索 RSS 形态就给准确值；不知道就拒绝（key=null 并给 reason），不要编造地址与模板
+                参考示例：
+                - acgnx：baseUrl https://share.acgnx.se 模板 rss.xml?keyword={kw}
+                - dmhy：baseUrl https://share.dmhy.org 模板 topics/rss/rss.xml?keyword={kw}
+                - nyaa：baseUrl https://nyaa.si 模板 ?page=rss&q={kw}&c=0_0&f=0
+                """;
+    }
+
+    public static String siteFillUser(String text) {
+        return "用户粘贴的文本：\n" + safe(text) + "\n请输出配置 JSON。";
+    }
+
     private static String safe(String s) {
         return s == null ? "（空）" : s;
     }
