@@ -106,6 +106,10 @@ av:
     max-calls-per-hour: 60
     # AI1 命中语义判定为「非本篇」时自动忽略（默认关——误判可清历史重评，谨慎开启）
     auto-ignore-non-episode: false
+    # v0.30 A5 单请求 max_tokens 上限（0=不注入；思考型模型勿配过小，否则 content 被截空）
+    max-tokens: 512
+    # v0.30 A7 媒体库 AI 解析自动绑定阈值（0=关闭仅预填人工确认；1~100 置信度达标自动绑定）
+    ai-bind-threshold: 85
 
 logging:
   level:

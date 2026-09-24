@@ -9,6 +9,7 @@ import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadRepository;
 import com.animeviewer.service.download.DownloadService;
 import com.animeviewer.service.media.LibraryScanner;
+import com.animeviewer.service.model.Dtos.AiRssResolveDto;
 import com.animeviewer.service.model.Dtos.DownloadAddRequest;
 import com.animeviewer.service.model.Dtos.DownloadSummaryDto;
 import com.animeviewer.service.model.Dtos.DownloadTaskDto;
@@ -472,6 +473,33 @@ public class SubscriptionService {
         }
         repo.setSubAiKeywords(id, toJsonKeywords(aiKeywords(sub)));
         return toDto(repo.findSub(id).orElseThrow());
+    }
+
+    /** v0.30 A6：AI 解析订阅地址（RSS 编辑弹层「AI 解析」）——站点形态规则映射先行（不需 AI 就绪），
+     *  规则推不出再走 LLM 兜底（附已启用站点 baseUrl/搜索模板上下文）。结果仅预填，保存仍人工（人工把关不变式）。 */
+    public AiRssResolveDto aiResolveRss(long id, String text) {
+        repo.findSub(id).orElseThrow(() -> new DownloadException(404, "订阅不存在"));
+        String rule = RssUrlExtractor.extract(text);
+        if (rule != null) {
+            return new AiRssResolveDto("rule", rule, "已从输入识别出 RSS 地址（规则映射，人工确认后保存）");
+        }
+        if (!ai.settings().ready()) {
+            throw new DownloadException(400, "规则未命中，且 AI 未启用或未配置（设置页「AI 分析」填写接口地址与模型）");
+        }
+        StringBuilder sites = new StringBuilder();
+        for (var s : resources.listSites()) {
+            if (s.enabled()) sites.append("- ").append(s.baseUrl()).append(" 模板：").append(s.searchTemplate()).append('\n');
+        }
+        JsonNode node = ai.askJson(AiPrompts.rssResolveSystem(), AiPrompts.rssResolveUser(text, sites.toString()));
+        if (node == null || !node.isObject()) {
+            return new AiRssResolveDto("none", null, "AI 解析失败（服务不可用或返回格式异常）");
+        }
+        String url = node.path("rssUrl").isTextual() ? node.path("rssUrl").asText("").trim() : "";
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            return new AiRssResolveDto("ai", url, "AI 已从文本解析出 RSS 地址（建议保存前人工核对）");
+        }
+        String reason = node.path("reason").asText("").trim();
+        return new AiRssResolveDto("none", null, "无法解析出 RSS 地址" + (reason.isBlank() ? "" : "：" + reason));
     }
 
     private List<String> aiKeywords(SubscriptionRepository.SubRow sub) {

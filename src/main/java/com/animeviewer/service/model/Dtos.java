@@ -30,7 +30,8 @@ public final class Dtos {
             String parsedTitle, Integer parsedEpisode,
             String matchState, Long subjectId, String subjectName, String subjectNameCn,
             Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error,
-            Long downloadTaskId, String downloadTaskName) {}
+            Long downloadTaskId, String downloadTaskName,
+            Integer aiMatchScore, String aiMatchReason) {}
 
     public record SubjectFileDto(
             long fileId, int sort, String name, Double durationSec, String ext, boolean direct) {}
@@ -151,13 +152,22 @@ public final class Dtos {
 
     /* ── v0.22 AI 分析剧集（AI0 Provider 设置 + AI1 命中语义判定）── */
 
-    /** AI 设置（ready/callsThisHour 服务端只读回显，PUT 时忽略）；extraHeaders 每行「Name: Value」附加头 */
+    /** AI 设置（ready/callsThisHour/totalCalls 服务端只读回显，PUT 时忽略）；extraHeaders 每行「Name: Value」附加头；
+     *  v0.30 A5/A7：maxTokens 单请求上限（0=不注入）、aiBindThreshold 媒体库自动绑定阈值（0=关闭仅预填） */
     public record AiSettingsDto(boolean enabled, String baseUrl, String model, String apiKey,
                                 int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode,
-                                boolean ready, int callsThisHour, String extraHeaders) {}
+                                boolean ready, int callsThisHour, String extraHeaders,
+                                int maxTokens, int aiBindThreshold, int totalCalls) {}
 
     /** AI3 文件名语义解析结果（LLM 判定 → 落 pending 待人工复核） */
     public record FileAnalyzeDto(String title, Integer episode) {}
+
+    /* ── v0.30 A6 订阅地址 AI 解析（规则映射 + LLM 兜底，结果仅预填人工保存）── */
+
+    /** source: rule=站点形态规则映射（不需 AI）/ ai=LLM 兜底 / none=推不出（message 给原因） */
+    public record AiRssResolveDto(String source, String rssUrl, String message) {}
+
+    public record AiRssResolveRequest(String text) {}
 
     /* ── v0.23 SB1 内封字幕（枚举 + VTT 提取）── */
 

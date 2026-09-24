@@ -58,6 +58,51 @@ public final class AiPrompts {
         return "文件名：" + safe(fileName) + "\n请输出解析 JSON。";
     }
 
+    /** v0.30 A7：判定「解析出的标题」与「Bangumi 候选条目」是否同一作品（同一 IP 不同季算不同作品）。
+     *  锚点收紧（§5R 验收实测：弱信号乱名仅凭子串词重叠会被过自信误判——子串重叠不算确信） */
+    public static String matchScoreSystem() {
+        return """
+                你是动漫作品匹配判定器。判断「解析出的标题」与「候选条目」是否为同一部作品（同一 IP 的不同季\
+                算不同作品，季号对不上要扣分）。只输出一个 JSON 对象，不要任何多余文字：
+                {"score":0到100的整数,"reason":"不超过40字"}
+                评分口径：
+                - 95~100=完全同一作品（仅繁简/全半角/标点差异）
+                - 85~94=同一作品但写法不同（罗马字↔中文译名/别名/常见简称——确信是同一部）
+                - 50~84=疑似但不确定（部分单词子串重叠、季号存疑、缺少关键信息）
+                - 0~49=不同作品、无法判断、或解析出的标题根本不是真实作品名（乱名/无意义词组）
+                硬规则：
+                - 仅凭个别单词重叠（如 HOME、LOVE 这类）不能构成 85+；除非整个标题就是该作品名
+                - 标题信息量不足以确定是哪部作品时 ≤79
+                """;
+    }
+
+    public static String matchScoreUser(String parsedTitle, String subjectNameCn, String subjectName, String year) {
+        return "解析出的标题：" + safe(parsedTitle)
+                + "\n候选条目（中文）：" + safe(subjectNameCn)
+                + "\n候选条目（原文）：" + safe(subjectName)
+                + "\n候选年份：" + safe(year)
+                + "\n请输出判定 JSON。";
+    }
+
+    /** v0.30 A6：从用户粘贴的页面 URL/文本解析 RSS 订阅地址（未知站点语义兜底；规则引擎先行，此处仅兜底） */
+    public static String rssResolveSystem() {
+        return """
+                你从用户粘贴的文本中解析出可直接订阅的 RSS/Atom 地址（喂给 RSS 阅读器的 feed URL，不是网页 URL）。
+                只输出一个 JSON 对象，不要任何多余文字：
+                {"rssUrl":"https://…（解析出的 feed 地址）"} 或 {"rssUrl":null,"reason":"不超过40字（为什么解析不出）"}
+                规则：
+                - 输入里已有 RSS/feed 形态地址（路径含 rss/feed 或以 .rss/.xml 结尾且非网页）→ 原样提取
+                - 资源站的「搜索页/条目页」URL 可按常见形态推导 feed（如 keyword 搜索页 → rss 订阅搜索结果）
+                - 推不出就 rssUrl=null 并给 reason；不要编造不存在的地址，不要编造站点域名
+                """;
+    }
+
+    public static String rssResolveUser(String text, String sitesContext) {
+        return "用户粘贴的文本：\n" + safe(text)
+                + "\n已启用资源站（baseUrl + 搜索模板，{kw} 为关键词占位符）：\n" + sitesContext
+                + "\n请输出解析 JSON。";
+    }
+
     private static String safe(String s) {
         return s == null ? "（空）" : s;
     }

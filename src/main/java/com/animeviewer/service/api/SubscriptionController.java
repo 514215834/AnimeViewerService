@@ -2,6 +2,8 @@ package com.animeviewer.service.api;
 
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.model.Dtos.DownloadTaskDto;
+import com.animeviewer.service.model.Dtos.AiRssResolveDto;
+import com.animeviewer.service.model.Dtos.AiRssResolveRequest;
 import com.animeviewer.service.model.Dtos.HitBatchDeleteRequest;
 import com.animeviewer.service.model.Dtos.HitBatchIgnoreRequest;
 import com.animeviewer.service.model.Dtos.HitIgnoreRequest;
@@ -113,6 +115,15 @@ public class SubscriptionController {
     @PostMapping("/api/subscriptions/{id}/ai-keywords")
     public SubscriptionDto aiKeywords(@PathVariable long id) {
         return service.generateHitKeywords(id);
+    }
+
+    /** v0.30 A6：AI 解析订阅地址（RSS 编辑弹层「AI 解析」——规则映射先行，推不出走 LLM 兜底；结果仅预填不落库） */
+    @PostMapping("/api/subscriptions/{id}/ai-rss")
+    public AiRssResolveDto aiResolveRss(@PathVariable long id, @RequestBody(required = false) AiRssResolveRequest req) {
+        if (req == null || req.text() == null || req.text().isBlank()) {
+            throw new DownloadException(400, "请先粘贴要解析的页面地址或文本");
+        }
+        return service.aiResolveRss(id, req.text());
     }
 
     @GetMapping("/api/subscriptions/settings")

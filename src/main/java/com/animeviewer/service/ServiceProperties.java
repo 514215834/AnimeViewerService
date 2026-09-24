@@ -69,11 +69,13 @@ public record ServiceProperties(
      * baseUrl OpenAI 兼容接口根地址（可含 /v1；本地 Ollama 形如 http://127.0.0.1:11434/v1）；
      * model 模型名；apiKey 可空（本地 Ollama 无鉴权）；timeoutSeconds 单次请求超时；
      * maxCallsPerHour 小时滚动配额护栏（0=不限）；autoIgnoreNonEpisode 命中语义判定非本篇时自动忽略（默认关）；
-     * extraHeaders 逐请求附加头（换行分隔「Name: Value」，如 x-opencode-session: xxx——非标网关通道需要会话头）。
+     * extraHeaders 逐请求附加头（换行分隔「Name: Value」，如 x-opencode-session: xxx——非标网关通道需要会话头）；
+     * maxTokens 单请求 max_tokens 上限（0=不注入；思考型模型 tokens 花在思考上，勿配过小）；
+     * aiBindThreshold 媒体库 AI 解析自动绑定阈值（0=关闭仅预填，1~100 置信度达标自动绑定）。
      */
     public record Ai(Boolean enabled, String baseUrl, String model, String apiKey,
                      Integer timeoutSeconds, Integer maxCallsPerHour, Boolean autoIgnoreNonEpisode,
-                     String extraHeaders) {}
+                     String extraHeaders, Integer maxTokens, Integer aiBindThreshold) {}
 
     public ServiceProperties {
         if (dataDir == null || dataDir.isBlank()) dataDir = "./data";
@@ -87,7 +89,7 @@ public record ServiceProperties(
         if (aria2 == null) aria2 = new Aria2("aria2c", "", "", 16800, "./data/downloads", 2, "",
                 List.of(), true, 0, false);
         if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true, 0, "", null);
-        if (ai == null) ai = new Ai(false, "https://api.openai.com/v1", "", "", 30, 60, false, "");
+        if (ai == null) ai = new Ai(false, "https://api.openai.com/v1", "", "", 30, 60, false, "", 512, 85);
         if (stream == null) stream = new Stream(2, 1);
     }
 }

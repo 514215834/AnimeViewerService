@@ -75,6 +75,17 @@ public class DbConfig {
             } catch (Exception e) {
                 // 列已存在（重复启动）——忽略
             }
+            // v0.30 A7 AI 解析候选匹配置信度（0~100，null=未评分；reason 为判定依据，供徽章 Tooltip）
+            try {
+                st.execute("ALTER TABLE media_files ADD COLUMN ai_match_score INTEGER");
+            } catch (Exception e) {
+                // 列已存在（重复启动）——忽略
+            }
+            try {
+                st.execute("ALTER TABLE media_files ADD COLUMN ai_match_reason TEXT");
+            } catch (Exception e) {
+                // 列已存在（重复启动）——忽略
+            }
             // v0.16 DN1 下载任务表：status=queued/metadata/downloading/paused/completed/error；
             // files_json 为 aria2 files 数组的净化快照（select-file 勾选状态随 watcher 轮询刷新）
             st.execute("""

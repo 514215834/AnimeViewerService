@@ -17,12 +17,14 @@ import java.util.List;
  *   <li>model 模型名；apiKey 可空（本地 Ollama 无鉴权）</li>
  *   <li>maxCallsPerHour 小时滚动配额护栏（0=不限；超限静默跳过判定，不影响主链路）</li>
  *   <li>autoIgnoreNonEpisode AI1 自动忽略非本篇命中（默认关——误判可清历史重评，谨慎开启）</li>
+ *   <li>maxTokens 单请求 max_tokens 上限（0=不注入；v0.30 A5——思考型模型勿配过小，否则 content 被截空）</li>
+ *   <li>aiBindThreshold 媒体库 AI 解析自动绑定阈值（0=关闭仅预填；v0.30 A7——置信度达标直接绑定）</li>
  * </ul>
  */
 public record AiSettings(
         boolean enabled, String baseUrl, String model, String apiKey,
         int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode,
-        String extraHeaders) {
+        String extraHeaders, int maxTokens, int aiBindThreshold) {
 
     public static final String STORE_KEY = "ai";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -37,7 +39,9 @@ public record AiSettings(
                 clamp(s.timeoutSeconds() == null ? 30 : s.timeoutSeconds(), 5, 120),
                 Math.max(0, s.maxCallsPerHour() == null ? 60 : s.maxCallsPerHour()),
                 s.autoIgnoreNonEpisode() != null && s.autoIgnoreNonEpisode(),
-                or(s.extraHeaders(), ""));
+                or(s.extraHeaders(), ""),
+                Math.max(0, s.maxTokens() == null ? 512 : s.maxTokens()),
+                clamp(s.aiBindThreshold() == null ? 85 : s.aiBindThreshold(), 0, 100));
     }
 
     public static AiSettings load(String storedJson, AiSettings defaults) {
@@ -52,7 +56,9 @@ public record AiSettings(
                     clamp(intOf(n, "timeoutSeconds", defaults.timeoutSeconds()), 5, 120),
                     Math.max(0, intOf(n, "maxCallsPerHour", defaults.maxCallsPerHour())),
                     boolOf(n, "autoIgnoreNonEpisode", defaults.autoIgnoreNonEpisode()),
-                    or(textOf(n, "extraHeaders"), defaults.extraHeaders()));
+                    or(textOf(n, "extraHeaders"), defaults.extraHeaders()),
+                    Math.max(0, intOf(n, "maxTokens", defaults.maxTokens())),
+                    clamp(intOf(n, "aiBindThreshold", defaults.aiBindThreshold()), 0, 100));
         } catch (Exception e) {
             return defaults;
         }
@@ -69,6 +75,8 @@ public record AiSettings(
             node.put("maxCallsPerHour", maxCallsPerHour);
             node.put("autoIgnoreNonEpisode", autoIgnoreNonEpisode);
             node.put("extraHeaders", extraHeaders);
+            node.put("maxTokens", maxTokens);
+            node.put("aiBindThreshold", aiBindThreshold);
             return MAPPER.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
@@ -84,6 +92,8 @@ public record AiSettings(
         }
         if (timeoutSeconds < 5 || timeoutSeconds > 120) return "超时需在 5~120 秒";
         if (maxCallsPerHour < 0 || maxCallsPerHour > 10_000) return "每小时调用上限需在 0~10000（0=不限）";
+        if (maxTokens < 0 || maxTokens > 32_768) return "max_tokens 需在 0~32768（0=不注入，由服务端默认）";
+        if (aiBindThreshold < 0 || aiBindThreshold > 100) return "媒体库自动绑定阈值需在 0~100（0=关闭自动绑定）";
         for (String err : parseHeaders().errors()) return err;
         return null;
     }
