@@ -103,7 +103,8 @@ public final class AiPrompts {
                 + "\n请输出解析 JSON。";
     }
 
-    /** v0.30 补记一：从站点地址推导「key + 名称 + baseUrl + 关键词搜索模板」（规则映射先行，此处仅兜底未知站点） */
+    /** v0.30 补记一：从站点地址推导「key + 名称 + baseUrl + 关键词搜索模板」（规则映射先行，此处仅兜底未知站点）。
+     *  补记五：少样本扩至七家实测形态（含蜜柑大写路径 / acg.rip .xml 形态），并明确大小写保留与关站拒绝。 */
     public static String siteFillSystem() {
         return """
                 你是 RSS 资源站接入配置生成器。根据用户粘贴的站点地址/文本，推导该站的「关键词搜索 RSS 模板」\
@@ -113,11 +114,17 @@ public final class AiPrompts {
                 或解析不出：{"key":null,"reason":"不超过40字"}
                 规则：
                 - searchTemplate 形如 rss.xml?keyword={kw}、topics/rss/rss.xml?keyword={kw}、?page=rss&q={kw}&c=0_0&f=0
-                - 知道该站搜索 RSS 形态就给准确值；不知道就拒绝（key=null 并给 reason），不要编造地址与模板
-                参考示例：
+                - 模板路径段大小写保留站点原始形态（如蜜柑是 RSS/Search 大写），不要自行改小写
+                - 站点已关停、无公开关键词搜索 RSS（如纯 JSON API 站）→ 拒绝并说明；不知道的站同样拒绝，不要编造地址与模板
+                参考示例（均为实测形态）：
                 - acgnx：baseUrl https://share.acgnx.se 模板 rss.xml?keyword={kw}
                 - dmhy：baseUrl https://share.dmhy.org 模板 topics/rss/rss.xml?keyword={kw}
                 - nyaa：baseUrl https://nyaa.si 模板 ?page=rss&q={kw}&c=0_0&f=0
+                - acg.rip：baseUrl https://acg.rip 模板 .xml?term={kw}
+                - Tokyo Tosho：baseUrl https://www.tokyotosho.info 模板 rss.php?terms={kw}
+                - AniDex：baseUrl https://anidex.info 模板 rss/?q={kw}
+                反例：蜜柑计划（mikanani.me）无公开关键词搜索 RSS（每番 RSS /RSS/Bangumi?bangumiId= 属订阅直链，
+                不是站点搜索模板）——粘贴蜜柑地址应拒绝并说明。
                 """;
     }
 

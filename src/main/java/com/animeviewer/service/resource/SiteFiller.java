@@ -16,8 +16,12 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>① 通用反推——输入已是 RSS 搜索地址（路径含 rss / query 含 page=rss，且带关键词参数）→
  *       baseUrl 取 scheme://authority，searchTemplate 取 path+query 并把关键词参数值替换为 {kw}
- *       （acgnx rss.xml?keyword=…、dmhy topics/rss/rss.xml?keyword=…、nyaa ?page=rss&q=… 全覆盖）</li>
- *   <li>② 已知站点形态——host 含 acgnx/dmhy/nyaa → 直接给内置同款模板</li>
+ *       （acgnx rss.xml?keyword=…、dmhy topics/rss/rss.xml?keyword=…、nyaa ?page=rss&q=…、
+ *       acg.rip .xml?term=…、tokyotosho rss.php?terms=… 全覆盖）</li>
+ *   <li>② 已知站点形态——host 含 acgnx/dmhy/acg.rip/tokyotosho/sukebei/nyaa/anidex
+ *       → 直接给内置同款模板（2026-09-25 补记五：acg.rip/tokyotosho/sukebei 均实抓验证，
+ *       anidex 站点 502 未能实测、形态取自公开索引器定义，测试连通把关兜底；
+ *       蜜柑无可用关键词搜索 RSS——/RSS/Search 实测恒空、每番 RSS 走订阅直链场景——不设预设）</li>
  *   <li>③ 其余 → null（调用方走 LLM 兜底，拒绝编造）</li>
  * </ul>
  * key 由 host 核心段推导（剔 www/share/mirror 等泛用段，[a-z0-9_-] 消毒）——与内置站同名时即覆盖内置定义。
@@ -29,8 +33,9 @@ public final class SiteFiller {
     /** 规则推导结果（模板已含 {kw}；key 已消毒） */
     public record Fill(String key, String name, String baseUrl, String searchTemplate) {}
 
-    /** 关键词参数名候选（值会被替换为 {kw}） */
-    private static final List<String> KW_KEYS = List.of("keyword", "kw", "q", "searchword", "searchterm");
+    /** 关键词参数名候选（值会被替换为 {kw}）——term：acg.rip /.xml?term= 形态（2026-09-25 实测）；
+     *  terms：tokyotosho rss.php?terms= 形态（2026-09-25 实抓 136 条） */
+    private static final List<String> KW_KEYS = List.of("keyword", "kw", "q", "searchword", "searchterm", "term", "terms");
 
     /** 泛用 host 段（不作为 key 候选） */
     private static final List<String> GENERIC_LABELS = List.of("www", "share", "mirror", "api", "bbs", "forum", "torrent", "bt", "rss", "m", "w");
@@ -73,31 +78,63 @@ public final class SiteFiller {
             }
         }
 
-        // ② 已知 host 预设（内置同款；key 复用内置名——key 相同覆盖内置定义合法）
+        // ② 已知 host 预设（内置同款；key 复用内置名——key 相同覆盖内置定义合法）。
+        //    v0.30 补记五扩容：acg.rip/tokyotosho/sukebei 实抓验证；anidex 站点 502 未能实测、形态取自公开索引器定义。
+        //    蜜柑不设预设：/RSS/Search?searchword= 实测对真实番名恒返回空频道（疑似废弃/匿名受限），
+        //    其可用 RSS 只有每番 /RSS/Bangumi?bangumiId=（订阅直链场景，不归站点管理）——预填空模板比拒绝更糟。
+        //    注意 sukebei 必须在 nyaa 之前判定（host 同时含两者字样，通用 nyaa 预设的 baseUrl 是 nyaa.si）。
         if (host.contains("acgnx")) {
             return new Fill("acgnx", "acgnx", "https://share.acgnx.se", "rss.xml?keyword=" + PLACEHOLDER);
         }
         if (host.contains("dmhy")) {
             return new Fill("dmhy", "dmhy", "https://share.dmhy.org", "topics/rss/rss.xml?keyword=" + PLACEHOLDER);
         }
+        if (host.endsWith("acg.rip") || host.contains("acg.rip")) {
+            return new Fill("acg", "acg.rip", "https://acg.rip", ".xml?term=" + PLACEHOLDER);
+        }
+        if (host.contains("tokyotosho")) {
+            return new Fill("tokyotosho", "Tokyo Tosho", "https://www.tokyotosho.info", "rss.php?terms=" + PLACEHOLDER);
+        }
+        if (host.contains("sukebei")) {
+            return new Fill("sukebei", "Sukebei", "https://sukebei.nyaa.si", "?page=rss&q=" + PLACEHOLDER + "&c=0_0&f=0");
+        }
         if (host.contains("nyaa")) {
             return new Fill("nyaa", "nyaa", "https://nyaa.si", "?page=rss&q=" + PLACEHOLDER + "&c=0_0&f=0");
+        }
+        if (host.contains("anidex")) {
+            return new Fill("anidex", "AniDex", "https://anidex.info", "rss/?q=" + PLACEHOLDER);
         }
         return null;
     }
 
-    /** host → key：剔 www/share 等泛用段，取最长非泛用段，消毒为 [a-z0-9_-]{1,24}；全剔时取首段 */
+    /** host → key：剔 www/share 等泛用段，取最长非泛用段，消毒为 [a-z0-9_-]{1,24}；全剔时取首段。
+     *  v0.30 补记二：单字符泛用段（m/w）改全等匹配——startsWith 会把 mikanani/wakanim 这类
+     *  以 m/w 开头的正常 host 段误剔，key 兜底拼接成 mikananime 怪名（§5R 补记四实测）。 */
     static String deriveKey(String host) {
         String[] parts = host.split("\\.");
         String best = null;
         for (String p : parts) {
             String seg = sanitize(p);
-            if (seg.isEmpty() || GENERIC_LABELS.stream().anyMatch(g -> seg.startsWith(g))) continue;
+            if (seg.isEmpty() || isGenericLabel(seg)) continue;
             if (best == null || seg.length() > best.length()) best = seg;
         }
         if (best == null || best.isEmpty()) best = sanitize(host);
         if (best.length() > 24) best = best.substring(0, 24);
         return best;
+    }
+
+    /** 泛用段判定：多字符段按前缀匹配（www2/mirror2 等），单字符段（m/w）必须全等 */
+    private static boolean isGenericLabel(String seg) {
+        return GENERIC_LABELS.stream().anyMatch(g -> g.length() == 1 ? seg.equals(g) : seg.startsWith(g));
+    }
+
+    /** v0.30 补记二：LLM 结果模板形态闸（纯函数，JUnit 护航）——大小写不敏感认 rss/feed/.xml。
+     *  初版 template.contains("rss") 大小写敏感：蜜柑正确模板 RSS/Search?searchword={kw}（大写路径）
+     *  与 acg.rip 正确模板 .xml?term={kw}（无 rss/feed 字样）都被误杀为「无法解析」（§5R 补记四实测）。 */
+    public static boolean looksLikeFeedTemplate(String template) {
+        if (template == null) return false;
+        String t = template.toLowerCase(Locale.ROOT);
+        return t.contains("rss") || t.contains("feed") || t.contains(".xml");
     }
 
     /** baseUrl → host（解析失败/空返回空串，供 LLM key 兜底推导） */

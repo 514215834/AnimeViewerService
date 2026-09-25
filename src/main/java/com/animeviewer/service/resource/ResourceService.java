@@ -109,12 +109,14 @@ public class ResourceService {
         String baseUrl = node.path("baseUrl").isTextual() ? node.path("baseUrl").asText("").trim() : "";
         if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) baseUrl = "";
         String template = node.path("searchTemplate").isTextual() ? node.path("searchTemplate").asText("").trim() : "";
-        boolean templateLooksFeedish = template.contains("rss") || template.contains("feed")
-                || template.toLowerCase(Locale.ROOT).contains("page=rss");
+        // v0.30 补记二：形态闸下沉 SiteFiller.looksLikeFeedTemplate——大小写不敏感 + 认可 .xml
+        // （初版大小写敏感：蜜柑 RSS/Search、acg.rip .xml?term= 的正确 LLM 推导被误杀，§5R 补记四）
+        boolean templateLooksFeedish = SiteFiller.looksLikeFeedTemplate(template);
         if (baseUrl.isEmpty() || template.isEmpty() || !template.contains("{kw}") || !templateLooksFeedish) {
             String reason = node.path("reason").isTextual() ? node.path("reason").asText("").trim() : "";
             return new AiSiteFillDto("none", null, null, null, null,
-                    "无法解析出站点配置" + (reason.isBlank() ? "" : "：" + reason));
+                    "无法解析出站点配置" + (reason.isBlank() ? "" : "：" + reason)
+                            + "。可尝试直接粘贴站点完整的关键词搜索 RSS 地址（含关键词参数即可规则直填，免 AI）");
         }
         String key = node.path("key").isTextual() ? node.path("key").asText("").trim().toLowerCase(Locale.ROOT) : "";
         String host = com.animeviewer.service.resource.SiteFiller.safeHost(baseUrl);
