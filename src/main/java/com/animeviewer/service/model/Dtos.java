@@ -88,7 +88,7 @@ public final class Dtos {
                                       Integer rpcPort, String qbPath,
                                       String downloadDir, Integer maxConcurrent,
                                       String uploadLimit, List<String> trackers, boolean autoScan,
-                                      int seedTimeMinutes, boolean checkCertificate) {}
+                                      int seedTimeMinutes, boolean checkCertificate, String proxy) {}
 
     /* ── v0.17 R1/R2 资源发现（RSS 站点源 + 条目找资源）── */
 

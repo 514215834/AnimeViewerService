@@ -64,7 +64,7 @@ public class Aria2Engine {
     /** 幂等：可用则直接返回；托管模式不可用且距上次拉起 ≥ 3s 时重试拉起 */
     public synchronized EngineInfo ensureRunning() {
         DownloadSettings s = currentSettings();
-        String dir = absDir(s.downloadDir());
+        String dir = absDir(s.downloadDir(), props.dataDir());
         String mode = s.engineUrl() == null || s.engineUrl().isBlank() ? "managed" : "external";
         try {
             if (client != null && clientMode.equals(mode)) {
@@ -128,6 +128,11 @@ public class Aria2Engine {
                     "--log-level=notice"));
             if (!s.trackers().isEmpty()) {
                 args.add("--bt-tracker=" + String.join(",", s.trackers()));
+            }
+            if (s.proxy() != null && !s.proxy().isBlank()) {
+                // v1.0 桌面版：aria2 不读系统代理，UDP tracker/DHT 直连出国全超时——
+                // 非空时 HTTP(S) tracker announce 经此代理（UDP 为 aria2 协议限制不走 HTTP 代理）
+                args.add("--all-proxy=" + s.proxy().trim());
             }
             if (s.uploadLimit() != null && !s.uploadLimit().isBlank()) {
                 args.add("--max-overall-upload-limit=" + s.uploadLimit());
@@ -214,9 +219,20 @@ public class Aria2Engine {
                 DownloadSettings.defaults(props));
     }
 
-    private String absDir(String dir) {
+    /**
+     * 相对下载目录解析锚定运行数据目录（的父层）——v1.0 桌面版实测修复「数据劈叉」：
+     * 壳注入 dataDir=%APPDATA%/AnimeViewer/data 而 CWD=安装目录，锚 CWD 会把下载目录
+     * 解析到程序目录旁（索引库在 %APPDATA%、下载文件在程序目录）。Web 形态 dataDir=./data
+     * 的父恰为 CWD，行为与既往完全一致。
+     */
+    public static String absDir(String dir, String dataDir) {
         try {
-            return Path.of(dir).toAbsolutePath().normalize().toString();
+            Path p = Path.of(dir);
+            if (p.isAbsolute()) return p.normalize().toString();
+            Path dataRoot = Path.of(dataDir).toAbsolutePath().normalize();
+            Path parent = dataRoot.getParent();
+            return parent != null ? parent.resolve(p).normalize().toString()
+                    : p.toAbsolutePath().normalize().toString();
         } catch (Exception e) {
             return dir;
         }

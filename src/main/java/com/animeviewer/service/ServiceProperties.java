@@ -45,11 +45,15 @@ public record ServiceProperties(
      * 前端设置页可改）。externalUrl 非空 = 对接外部 aria2 实例；否则托管拉起 path 指定的可执行文件。
      * checkCertificate 默认 false：Windows 版 aria2 走 schannel，启用吊销检查时 HTTPS tracker
      * 因「吊销服务器不可达」握手失败（v0.16 原型实测 80092013），个人内网工具默认关闭并如实记录。
+     * v1.0-D2 后随桌面化新增 proxy：aria2 不读系统代理，国内网络 UDP tracker/DHT 直连出国常被
+     * QoS/阻断（桌面版实测全超时）——非空时拉起注入 --all-proxy 使 HTTP(S) tracker announce 走
+     * 本机代理（UDP tracker/DHT 为 aria2 协议限制不走 HTTP 代理，如实记录）；trackers 默认换
+     * 经代理可达的 HTTP tracker（v1.0 桌面版实测：UDP 直连全超时，HTTP 经代理均有响应）。
      */
     public record Aria2(String path, String externalUrl, String externalSecret, Integer rpcPort,
                         String downloadDir, Integer maxConcurrent, String uploadLimit,
                         List<String> trackers, boolean autoScan, Integer seedTimeMinutes,
-                        boolean checkCertificate) {}
+                        boolean checkCertificate, String proxy) {}
 
     /**
      * v0.19 SU1 订阅自动化 yml 默认值——运行期可经 /api/subscriptions/settings 覆盖（存 SQLite）。
@@ -87,7 +91,10 @@ public record ServiceProperties(
         if (proxy == null) proxy = new Proxy(List.of(), 6);
         if (webdav == null) webdav = new Webdav(10);
         if (aria2 == null) aria2 = new Aria2("aria2c", "", "", 16800, "./data/downloads", 2, "",
-                List.of(), true, 0, false);
+                List.of("http://tracker2.dler.org:80/announce", "http://tracker.bt4g.com:2095/announce",
+                        "http://tracker.gbitt.info:80/announce", "http://tracker.openbittorrent.com:80/announce",
+                        "http://open.acgnxtracker.com:80/announce"),
+                true, 0, false, "");
         if (subscription == null) subscription = new Subscription(60, 0, 5, 0, true, 0, "", null);
         if (ai == null) ai = new Ai(false, "https://api.openai.com/v1", "", "", 30, 60, false, "", 512, 85);
         if (stream == null) stream = new Stream(2, 1);

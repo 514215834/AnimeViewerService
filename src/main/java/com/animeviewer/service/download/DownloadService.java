@@ -285,7 +285,7 @@ public class DownloadService {
                 dto.engineType(), dto.enginePath(), dto.engineUrl(), dto.engineSecret(), dto.rpcPort(),
                 dto.qbPath(),
                 dto.downloadDir(), dto.maxConcurrent(), dto.uploadLimit(), dto.trackers(),
-                dto.autoScan(), dto.seedTimeMinutes(), dto.checkCertificate());
+                dto.autoScan(), dto.seedTimeMinutes(), dto.checkCertificate(), dto.proxy());
         String err = merged.validate();
         if (err != null) throw new DownloadException(400, err);
         repo.putSetting(DownloadSettings.STORE_KEY, merged.toJson());
@@ -608,7 +608,7 @@ public class DownloadService {
         return new DownloadSettingsDto(s.engineType(), s.enginePath(), s.engineUrl(), s.engineSecret(), s.rpcPort(),
                 s.qbPath(),
                 s.downloadDir(), s.maxConcurrent(), s.uploadLimit(), s.trackers(), s.autoScan(),
-                s.seedTimeMinutes(), s.checkCertificate());
+                s.seedTimeMinutes(), s.checkCertificate(), s.proxy());
     }
 
     public static String statusLabel(String status) {

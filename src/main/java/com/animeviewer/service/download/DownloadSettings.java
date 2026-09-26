@@ -16,7 +16,8 @@ public record DownloadSettings(
         String enginePath, String engineUrl, String engineSecret, int rpcPort,
         String qbPath,
         String downloadDir, int maxConcurrent, String uploadLimit,
-        List<String> trackers, boolean autoScan, int seedTimeMinutes, boolean checkCertificate) {
+        List<String> trackers, boolean autoScan, int seedTimeMinutes, boolean checkCertificate,
+        String proxy) {
 
     public static final String STORE_KEY = "download";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -43,7 +44,8 @@ public record DownloadSettings(
                 a.trackers() == null ? List.of() : a.trackers(),
                 a.autoScan(),
                 a.seedTimeMinutes() == null ? 0 : a.seedTimeMinutes(),
-                a.checkCertificate());
+                a.checkCertificate(),
+                a.proxy() == null ? "" : a.proxy());
     }
 
     /** 存储覆盖（可部分字段）叠加到默认值 */
@@ -64,7 +66,8 @@ public record DownloadSettings(
                     trackers(n, defaults.trackers()),
                     boolOf(n, "autoScan", defaults.autoScan()),
                     intOf(n, "seedTimeMinutes", defaults.seedTimeMinutes()),
-                    boolOf(n, "checkCertificate", defaults.checkCertificate()));
+                    boolOf(n, "checkCertificate", defaults.checkCertificate()),
+                    text(n, "proxy", defaults.proxy()));
         } catch (Exception e) {
             return defaults;
         }
@@ -97,6 +100,7 @@ public record DownloadSettings(
             node.put("autoScan", autoScan);
             node.put("seedTimeMinutes", seedTimeMinutes);
             node.put("checkCertificate", checkCertificate);
+            node.put("proxy", proxy);
             return MAPPER.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
@@ -110,6 +114,8 @@ public record DownloadSettings(
         if (downloadDir == null || downloadDir.isBlank()) return "下载目录不能为空";
         if (seedTimeMinutes < 0 || seedTimeMinutes > 100000) return "做种分钟数需 ≥ 0";
         if (qbittorrent() && (qbPath == null || qbPath.isBlank())) return "qBittorrent 直开模式需填写 qBittorrent 可执行文件路径";
+        if (proxy != null && !proxy.isBlank() && !proxy.trim().matches("^(https?|socks[45]?|ftp)://.+"))
+            return "下载代理需含协议前缀（如 http://127.0.0.1:7897）";
         return null;
     }
 
