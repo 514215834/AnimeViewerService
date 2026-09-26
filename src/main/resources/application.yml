@@ -15,6 +15,9 @@ spring:
 av:
   # 运行数据目录（token / SQLite 索引库），相对 jar 工作目录
   data-dir: ./data
+  # v1.0 D2 桌面壳父进程心跳：仅桌面版由壳注入真实 pid（--av.parent-pid=<壳pid>），0=关闭。
+  # 壳进程失联后服务端 5s 内优雅退出（@PreDestroy 收尾托管 aria2c），防孤儿进程占用 8787
+  parent-pid: 0
   # ffmpeg / ffprobe 可执行文件：默认从 PATH 探测；未入 PATH 时填完整路径
   ffmpeg-path: ffmpeg
   ffprobe-path: ffprobe
