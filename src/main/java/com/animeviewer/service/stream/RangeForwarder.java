@@ -29,9 +29,14 @@ public class RangeForwarder {
     public static final long MAX_PLAYLIST_BYTES = 2 * 1024 * 1024;
 
     private final HttpClient client;
+    private final ServiceProperties props;
     private final String userAgent;
+    /** v0.26 HN3 在线视频容灾转发的粘性线路记忆（true = 上次成功走代理） */
+    private volatile boolean failoverUsedProxy = false;
+    private volatile HttpClient proxyClient;
 
     public RangeForwarder(ServiceProperties props, HttpClient client) {
+        this.props = props;
         this.client = client;
         this.userAgent = props.bangumi().userAgent();
     }
@@ -41,7 +46,7 @@ public class RangeForwarder {
 
     /**
      * @param playlistRewriter 非 null 时启用清单改写（传入「清单文本→重写文本」函数，内部逐 URI 包裹）；null 一律按流转发
-     * @param extraHeaders     附加请求头（如 WebDAV Basic 授权）；可为 null
+     * @param extraHeaders     附加请求头（如 WebDAV Basic 授权；同名覆盖内置头）；可为 null
      * @return 本次转发形态
      */
     public Outcome forward(String targetUrl,
@@ -49,15 +54,101 @@ public class RangeForwarder {
                            HttpServletResponse response,
                            UnaryOperator<String> playlistRewriter,
                            java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
+        return forwardWith(client, targetUrl, rangeHeader, response, playlistRewriter, extraHeaders);
+    }
+
+    /** v0.26 HN3 直连→代理容灾转发（仅 hanime 在线视频使用，既有 forward() 行为不变）：
+     *  线路口径对齐 ResourceService.fetchViaFailover——IOException 行级失败（DNS 污染超时/拒绝、
+     *  TLS 握手掐断、重置）切线重试一次，成功线路粘性记忆；HTTP 层非 200 原样透传给客户端（不切线）。 */
+    public Outcome forwardFailover(String targetUrl,
+                                   String rangeHeader,
+                                   HttpServletResponse response,
+                                   UnaryOperator<String> playlistRewriter,
+                                   java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
+        boolean proxyOnly = "proxy".equalsIgnoreCase(props.bangumi().proxyMode());
+        boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+        IOException last = null;
+        boolean tryProxy = failoverUsedProxy && !directOnly;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            boolean useProxy = proxyOnly || (tryProxy && !directOnly);
+            HttpClient hc = client;
+            if (useProxy) {
+                hc = proxyClient();
+                if (hc == null) {
+                    tryProxy = false;
+                    continue;
+                }
+            }
+            try {
+                Outcome out = forwardWith(hc, targetUrl, rangeHeader, response, playlistRewriter, extraHeaders);
+                failoverUsedProxy = useProxy;
+                return out;
+            } catch (IOException e) {
+                // v0.27 A1 客户端断开（关闭/换集/seek 时浏览器中断连接）不是线路故障：
+                // 切线重拉只会再拉一次直到同样写失败（代理也白拉一次）+ 每次留 INFO 噪音。
+                // 客户端断开类异常直接上抛（原注释既定「客户端中途断开属正常路径」）。
+                if (isClientAbort(e)) {
+                    log.debug("客户端断开转发连接（{}），不切线", e.toString());
+                    throw e;
+                }
+                last = e;
+                log.info("在线视频{}失败（{}），切换为{}重试",
+                        useProxy ? "经代理转发" : "直连转发", e.toString(), useProxy ? "直连" : "经代理");
+                tryProxy = !useProxy;
+            }
+        }
+        throw last != null ? last : new IOException("转发失败");
+    }
+
+    /** v0.27 A1 客户端断开判定（包级静态供单测）：
+     *  AsyncRequestNotUsableException = Spring 对「响应已不可用」（浏览器关闭/换集/seek 中断连接，
+     *  Tomcat 底层 IOException「你的主机中的软件中止了一个已建立的连接」/ Broken pipe）的包装，
+     *  extends IOException 因此落进上面的 catch——按线路故障切线是误判；
+     *  文案兜底只收「写侧独有」的消息（broken pipe 与 Windows 的 WSAECONNABORTED 中英文形态）——
+     *  「Connection reset」可能来自上游读侧（真实线路故障），必须继续切线不容错判。 */
+    static boolean isClientAbort(IOException e) {
+        if (e instanceof org.springframework.web.context.request.async.AsyncRequestNotUsableException) return true;
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        return msg.contains("Broken pipe") || msg.contains("broken pipe")
+                || msg.contains("中止了一个已建立的连接")
+                || msg.contains("Software caused connection abort");
+    }
+
+    /** av.bangumi 代理地址的 HttpClient（懒加载；未配置代理返回 null） */
+    private HttpClient proxyClient() {
+        if (proxyClient != null) return proxyClient;
+        String host = props.bangumi().proxyHost();
+        Integer port = props.bangumi().proxyPort();
+        if (host == null || host.isBlank() || port == null) return null;
+        synchronized (this) {
+            if (proxyClient == null) {
+                proxyClient = java.net.http.HttpClient.newBuilder()
+                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                        .connectTimeout(Duration.ofSeconds(10))
+                        .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(host, port)))
+                        .build();
+            }
+            return proxyClient;
+        }
+    }
+
+    private Outcome forwardWith(HttpClient hc,
+                                String targetUrl,
+                                String rangeHeader,
+                                HttpServletResponse response,
+                                UnaryOperator<String> playlistRewriter,
+                                java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
         HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(targetUrl))
                 .timeout(Duration.ofSeconds(60))
                 .header("User-Agent", userAgent)
                 .header("Accept", "*/*");
         boolean rangeSent = rangeHeader != null && !rangeHeader.isBlank();
         if (rangeSent) rb.header("Range", rangeHeader);
-        if (extraHeaders != null) extraHeaders.forEach(rb::header);
+        // setHeader = 同名覆盖内置头（hanime 流转发以浏览器 UA/Referer 覆盖默认 UA；
+        // 既有 WebDAV 授权单值头行为不变）
+        if (extraHeaders != null) extraHeaders.forEach(rb::setHeader);
 
-        HttpResponse<InputStream> up = client.send(rb.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<InputStream> up = hc.send(rb.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
         String contentType = up.headers().firstValue("Content-Type").orElse("");
 
         try (InputStream in = up.body()) {

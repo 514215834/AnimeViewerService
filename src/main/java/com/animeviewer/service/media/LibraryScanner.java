@@ -185,7 +185,9 @@ public class LibraryScanner implements ApplicationRunner {
                     probe != null ? System.currentTimeMillis() : existing.map(MediaFileRow::probedAt).orElse(null),
                     probe == null ? null : probe.error(),
                     existing.map(MediaFileRow::downloadTaskId).orElse(null),
-                    null);
+                    null,
+                    existing.map(MediaFileRow::aiMatchScore).orElse(null),
+                    existing.map(MediaFileRow::aiMatchReason).orElse(null));
 
             boolean isNew = existing.isEmpty();
             repo.upsertScannedFile(dirId, row);

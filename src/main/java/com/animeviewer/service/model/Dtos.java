@@ -30,7 +30,8 @@ public final class Dtos {
             String parsedTitle, Integer parsedEpisode,
             String matchState, Long subjectId, String subjectName, String subjectNameCn,
             Integer episodeSort, boolean autoBound, Long matchedAt, Long probedAt, String error,
-            Long downloadTaskId, String downloadTaskName) {}
+            Long downloadTaskId, String downloadTaskName,
+            Integer aiMatchScore, String aiMatchReason) {}
 
     public record SubjectFileDto(
             long fileId, int sort, String name, Double durationSec, String ext, boolean direct) {}
@@ -91,15 +92,22 @@ public final class Dtos {
 
     /* ── v0.17 R1/R2 资源发现（RSS 站点源 + 条目找资源）── */
 
+    /** v0.24 SE1：magnet 可空（种子型站点 nyaa/蜜柑 enclosure 为 .torrent 直链，无磁力）；
+     *  torrentUrl 兜底承载种子直链，入队/订阅链路对二选一自适应（有磁力优先磁力）。 */
     public record ResourceItemDto(String title, String magnet, String infoHash, String site,
                                   String size, String category, String publisher, Long pubDate,
-                                  String link) {}
+                                  String link, String torrentUrl) {}
 
+    /** v0.24 SM5：enabled 启停（null=缺省启用，兼容旧 JSON）；写路径 saveSite 消费、listSites 回显 */
     public record ResourceSiteDto(String key, String name, String baseUrl, String searchTemplate,
-                                  boolean builtin) {}
+                                  boolean builtin, Boolean enabled) {}
 
     public record ResourceSearchDto(String keyword, List<ResourceItemDto> items,
                                     List<ResourceSiteDto> sites, String error) {}
+
+    /** v0.24 SM3 站点测试连通（不入库）：ok=false 时 error 为失败原因；samples 为解析样例（前 3 条） */
+    public record ResourceSiteTestDto(boolean ok, String error, int itemCount,
+                                      List<ResourceItemDto> samples) {}
 
     public record ResourceAddRequest(String magnet, Long subjectId, String subjectName,
                                      String subjectNameCn, Integer episodeSort) {}
@@ -110,14 +118,16 @@ public final class Dtos {
                                   boolean auto, int minEpisode, List<String> ignoredFansubs,
                                   Integer autoScore, String lastCheckError,
                                   Long lastCheckedAt, Long lastHitAt, long createdAt,
-                                  List<String> aiKeywords) {}
+                                  List<String> aiKeywords, String rssUrl) {}
 
     public record SubscriptionAddRequest(Long subjectId, String subjectName, String subjectNameCn,
                                          Integer minEpisode, Integer autoScore) {}
 
     /** 可选字段 PATCH 语义：null = 不改；autoScore 为 v0.20 匹配度阈值（0=全手动特殊值，1~100 自动入队）；
-     *  aiKeywords 为 v0.22 AI2 扩展检索词（LLM 生成缓存/人工编辑，逐词 ≤100 字符、至多 10 条） */
-    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode, List<String> aiKeywords) {}
+     *  aiKeywords 为 v0.22 AI2 扩展检索词（LLM 生成缓存/人工编辑，逐词 ≤100 字符、至多 10 条）；
+     *  rssUrl 为 v0.25 RSS 固定直链订阅源（null = 不改；空串 = 清除回关键词检索；非空 = 设置，须 http(s)://） */
+    public record SubscriptionUpdateRequest(Integer autoScore, Integer minEpisode, List<String> aiKeywords,
+                                            String rssUrl) {}
 
     public record SubHitDto(long id, long subjectId, String subjectName, String subjectNameCn,
                             Integer episodeSort, String title, String fansub, String magnet, String infoHash,
@@ -142,16 +152,75 @@ public final class Dtos {
 
     /* ── v0.22 AI 分析剧集（AI0 Provider 设置 + AI1 命中语义判定）── */
 
-    /** AI 设置（ready/callsThisHour 服务端只读回显，PUT 时忽略）；extraHeaders 每行「Name: Value」附加头 */
+    /** AI 设置（ready/callsThisHour/totalCalls 服务端只读回显，PUT 时忽略）；extraHeaders 每行「Name: Value」附加头；
+     *  v0.30 A5/A7：maxTokens 单请求上限（0=不注入）、aiBindThreshold 媒体库自动绑定阈值（0=关闭仅预填） */
     public record AiSettingsDto(boolean enabled, String baseUrl, String model, String apiKey,
                                 int timeoutSeconds, int maxCallsPerHour, boolean autoIgnoreNonEpisode,
-                                boolean ready, int callsThisHour, String extraHeaders) {}
+                                boolean ready, int callsThisHour, String extraHeaders,
+                                int maxTokens, int aiBindThreshold, int totalCalls) {}
 
     /** AI3 文件名语义解析结果（LLM 判定 → 落 pending 待人工复核） */
     public record FileAnalyzeDto(String title, Integer episode) {}
+
+    /* ── v0.30 补记一 站点配置 AI 解析（站点管理「AI 解析」按钮，结果仅预填人工把关）── */
+
+    /** source: rule=已知站点规则映射（不需 AI）/ ai=LLM 兜底 / none=推不出（message 给原因） */
+    public record AiSiteFillDto(String source, String key, String name, String baseUrl,
+                                String searchTemplate, String message) {}
+
+    public record AiSiteFillRequest(String text) {}
+
+    /* ── v0.30 A6 订阅地址 AI 解析（规则映射 + LLM 兜底，结果仅预填人工保存）── */
+
+    /** source: rule=站点形态规则映射（不需 AI）/ ai=LLM 兜底 / none=推不出（message 给原因） */
+    public record AiRssResolveDto(String source, String rssUrl, String message) {}
+
+    public record AiRssResolveRequest(String text) {}
 
     /* ── v0.23 SB1 内封字幕（枚举 + VTT 提取）── */
 
     /** 字幕轨：index 为字幕轨序号（0 基，字幕轨内排序，非流 index）；codec/language/title 可能缺省 */
     public record SubtitleTrackDto(int index, String codec, String language, String title) {}
+
+    /* ── v0.28 P2 多音轨与章节 ── */
+
+    /** 音轨：index 为音轨序号（0 基，codec_type=audio 出现顺序——与 -map 0:a:N 同口径，非流 index）；
+     *  codec/channels/language/title 可能缺省 */
+    public record AudioTrackDto(int index, String codec, Integer channels, String language, String title) {}
+
+    /** 章节：start/end 为文件绝对秒；title 可能缺省（ffprobe -show_chapters） */
+    public record ChapterDto(double start, double end, String title) {}
+
+    /* ── v0.26 HN1/HN2 hanime1.me 在线解析（配置 / 搜索 / 视频解析）── */
+
+    /** 配置回显：cookie 不回传明文（只回 hasCookie） */
+    public record HanimeConfigDto(boolean enabled, String ua, boolean hasCookie) {}
+
+    /** 配置更新：null=不改动（cookie 空串=清除） */
+    public record HanimeConfigUpdateRequest(Boolean enabled, String ua, String cookie) {}
+
+    /** 搜索结果条目：videoCode 为 watch?v= 参数（播放/绑定的稳定键）；likes/views 为站点原始文案（如 "100%" / "38.2萬次"） */
+    public record HanimeSearchItem(String videoCode, String title, String thumbnail, String duration,
+                                   String likes, String views, String brand) {}
+
+    public record HanimeSearchResult(int page, boolean hasNext, List<HanimeSearchItem> items) {}
+
+    /** 视频源：label 为分辨率显示名（如 "1080p"），url 为带签名的 mp4 直链（有时效，勿长期缓存） */
+    public record HanimeSource(String label, int res, String url) {}
+
+    /** v0.27 A2 系列合集条目（watch 页侧栏播放列表项）：current=当前播放条目（前端高亮） */
+    public record HanimePlaylistItem(String videoCode, String title, String thumbnail, String duration,
+                                     boolean current) {}
+
+    /** 侧栏播放列表（站点以「社團/系列」二态承载系列合集）：category 为顶部块分类文案（社團/系列），
+     *  name 为列表归属名（上传者名等），total 为站点计数的影片数；无播放列表时为 null */
+    public record HanimePlaylist(String category, String name, int total, List<HanimePlaylistItem> items) {}
+
+    /** watch 页解析结果：sources 按分辨率降序（默认取首档）；brand 缺省时从标题前缀 [组名] 提取；
+     *  playlist 为侧栏系列/社团合集（v0.27 A2，无侧栏时 null） */
+    public record HanimeWatchDto(String videoCode, String title, String poster, String brand,
+                                 List<String> tags, List<HanimeSource> sources, HanimePlaylist playlist) {}
+
+    /** 连通测试：恒 200，ok=false 时 message 给三分类原因 */
+    public record HanimeTestDto(boolean ok, String message, int itemCount) {}
 }

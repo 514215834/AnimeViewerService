@@ -55,12 +55,19 @@ public class BangumiMatcher {
         log.info("Bangumi 线路模式: {}（代理: {}）", mode, hasProxy ? host + ":" + props.bangumi().proxyPort() : "未配置");
     }
 
+    /** v0.27 C1（补记四回退件复用，见 §5N 补记六承诺）：SimpleClientHttpRequestFactory（HttpURLConnection）
+     *  经代理访问 api.bgm.tv 稳定 502（curl / JDK HttpClient 同代理均 200 实锤）→ 换 JdkClientHttpRequestFactory
+     *  （与 HanimeService 同款 java.net.http.HttpClient）；显式 connect 5s / read 20s——原 Simple 工厂零超时，
+     *  直连 DNS 污染时挂 OS 层 SYN 超时 ~21s 才切线路。exchange 尝试次数维持现状（2 次）不变。 */
     private RestClient buildClient(boolean viaProxy) {
-        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        java.net.http.HttpClient.Builder cb = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(5));
         if (viaProxy) {
-            factory.setProxy(new java.net.Proxy(java.net.Proxy.Type.HTTP,
-                    new java.net.InetSocketAddress(props.bangumi().proxyHost(), props.bangumi().proxyPort())));
+            cb.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(
+                    props.bangumi().proxyHost(), props.bangumi().proxyPort())));
         }
+        var factory = new org.springframework.http.client.JdkClientHttpRequestFactory(cb.build());
+        factory.setReadTimeout(java.time.Duration.ofSeconds(20));
         return RestClient.builder()
                 .baseUrl(props.bangumi().baseUrl())
                 .requestFactory(factory)

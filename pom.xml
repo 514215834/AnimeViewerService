@@ -13,13 +13,14 @@
 
   <groupId>com.animeviewer</groupId>
   <artifactId>animeviewer-service</artifactId>
-  <version>0.23.0</version>
+  <version>0.30.0</version>
   <name>AnimeViewerService</name>
   <description>AnimeViewer 本地媒体服务（v0.19）：媒体库扫描 / Bangumi 匹配 / 流式播放 / 流代理 / WebDAV / BT 下载（aria2 / qBittorrent 直开）/ 订阅自动化</description>
 
   <properties>
     <java.version>21</java.version>
     <sqlite-jdbc.version>3.41.2.2</sqlite-jdbc.version>
+    <jsoup.version>1.18.3</jsoup.version>
   </properties>
 
   <dependencies>
@@ -35,6 +36,12 @@
       <groupId>org.xerial</groupId>
       <artifactId>sqlite-jdbc</artifactId>
       <version>${sqlite-jdbc.version}</version>
+    </dependency>
+    <!-- v0.26 HN2：hanime1.com 页面 HTML 解析（在线播放解析层唯一新依赖，无状态纯解析） -->
+    <dependency>
+      <groupId>org.jsoup</groupId>
+      <artifactId>jsoup</artifactId>
+      <version>${jsoup.version}</version>
     </dependency>
 
     <dependency>

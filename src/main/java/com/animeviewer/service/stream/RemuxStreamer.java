@@ -43,9 +43,15 @@ public class RemuxStreamer {
         return Math.max(1, props.remux().maxConcurrent());
     }
 
-    /** 将转封装流拷贝到响应输出流（阻塞直至完成 / 客户端断开）。返回是否成功产出字节。 */
+    /** 将转封装流拷贝到响应输出流（阻塞直至完成 / 客户端断开）。返回是否成功产出字节。
+     *  v0.28 P2：audioIdx 非空 = 音轨切换——视频仍 copy（廉价），音频转 aac（flac/dts 不能
+     *  copy 进 fMP4 稳妥播放；轨序与 ffprobe -select_streams a 枚举同口径）。null = 既有行为。 */
     public boolean pump(String filePath, double seekSeconds, OutputStream out) {
-        var pb = new ProcessBuilder(buildCommand(filePath, seekSeconds));
+        return pump(filePath, seekSeconds, null, out);
+    }
+
+    public boolean pump(String filePath, double seekSeconds, Integer audioIdx, OutputStream out) {
+        var pb = new ProcessBuilder(buildCommand(filePath, seekSeconds, audioIdx));
         pb.redirectErrorStream(false);
         Process proc = null;
         boolean wroteAny = false;
@@ -80,8 +86,9 @@ public class RemuxStreamer {
         }
     }
 
-    /** 命令组装（包级可见，供单测断言参数形态） */
-    String[] buildCommand(String filePath, double seekSeconds) {
+    /** 命令组装（包级可见，供单测断言参数形态）。audioIdx 非空 = 音轨切换（-c:v copy + -c:a aac）；
+     *  null = 既有 -c copy 行为（零回归）。 */
+    String[] buildCommand(String filePath, double seekSeconds, Integer audioIdx) {
         var cmd = new java.util.ArrayList<String>();
         cmd.add(props.ffmpegPath());
         cmd.add("-hide_banner");
@@ -93,15 +100,24 @@ public class RemuxStreamer {
         }
         cmd.add("-i");
         cmd.add(filePath);
-        // 仅取首视频轨 + 首音频轨：字幕/数据轨不能进 mp4（ass 等 copy 会直接报错）
+        // 仅取首视频轨 + 指定音频轨：字幕/数据轨不能进 mp4（ass 等 copy 会直接报错）
         cmd.add("-map");
         cmd.add("0:v:0");
         cmd.add("-map");
-        cmd.add("0:a:0?");
+        cmd.add("0:a:" + (audioIdx == null ? "0?" : Math.max(0, Math.min(audioIdx, 63)) + "?"));
         cmd.add("-sn");
         cmd.add("-dn");
-        cmd.add("-c");
-        cmd.add("copy");
+        if (audioIdx == null) {
+            cmd.add("-c");
+            cmd.add("copy");
+        } else {
+            cmd.add("-c:v");
+            cmd.add("copy");
+            cmd.add("-c:a");
+            cmd.add("aac");
+            cmd.add("-b:a");
+            cmd.add("192k");
+        }
         cmd.add("-movflags");
         cmd.add("+frag_keyframe+empty_moov");
         cmd.add("-f");

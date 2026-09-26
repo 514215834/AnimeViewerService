@@ -4,6 +4,7 @@ import com.animeviewer.service.model.Dtos.MediaFileDto;
 import com.animeviewer.service.store.MediaRepository;
 import com.animeviewer.service.stream.RangeSupport;
 import com.animeviewer.service.stream.RemuxStreamer;
+import com.animeviewer.service.stream.TranscodeStreamer;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -23,8 +24,12 @@ import java.util.Locale;
 import java.util.Set;
 
 /** S4 流式播放：
- *  - mp4/m4v/webm（H.264/VP9/AAC 等浏览器原生可解码）与 mkv（v0.23 SB0 直发探测通过）→ HTTP Range 随机访问（206 分段）
+ *  - mp4/m4v/webm/mkv（H.264/VP9/AAC 等浏览器原生可解码）→ HTTP Range 随机访问（206 分段）
  *  - 其余容器（avi/ts/wmv/flv…）→ ffmpeg 转封装 fMP4 流（?t= 秒指定起点，seek 重拉）
+ *  v0.28 P1 第四层 实时转码：浏览器不可解码编码（HEVC-10bit/mpeg4/mpeg2/vc1…，扫描时
+ *  vcodec 已落库零探测成本）→ libx264 实时转码管道（X-AV-Transcode 头标注）；?transcode=on
+ *  启用（前端设置页开关），?preset= 三档质量，?audio=N 音轨切换（P2，可解编码走转封装
+ *  copy+音频转 aac，不可解编码随转码管道）。
  *  <video> 标签无法携带自定义请求头，Token 经查询参数传递（本服务为局域网个人服务，风险可接受）。 */
 @RestController
 public class StreamController {
@@ -40,21 +45,45 @@ public class StreamController {
     private static final Set<String> CONTENT_TYPES = Set.of(
             "video/mp4", "video/webm", "video/ogg", "video/x-msvideo", "video/x-ms-wmv", "video/mp2t", "video/quicktime");
 
+    /** 浏览器可解码的视频编码（v0.28 P1）：扫描落库 vcodec 命中 → 既有直发/转封装路径零回归；
+     *  未命中（hevc/mpeg4/mpeg2video/vc1/未知 exotic 编码…）→ 转码兜底——浏览器视频解码面
+     *  基本只有这四种，白名单外转码才能扩大可播面。null/空白按可解处理（保守回退旧路径）。 */
+    static final Set<String> PLAYABLE_VCODECS = Set.of("h264", "vp8", "vp9", "av1");
+
+    /** 播放路由（v0.28 P1 决策纯函数结果） */
+    enum Route { DIRECT, REMUX, TRANSCODE }
+
     private final MediaRepository repo;
     private final RemuxStreamer remuxer;
+    private final TranscodeStreamer transcoder;
 
-    public StreamController(MediaRepository repo, RemuxStreamer remuxer) {
+    public StreamController(MediaRepository repo, RemuxStreamer remuxer, TranscodeStreamer transcoder) {
         this.repo = repo;
         this.remuxer = remuxer;
+        this.transcoder = transcoder;
     }
 
     public static boolean isDirectExt(String ext) {
         return ext != null && DIRECT_EXTS.contains(ext.toLowerCase(Locale.ROOT));
     }
 
+    /** v0.28 P1 路由决策（包级静态纯函数，供单测）：
+     *  - 音轨参数出现 → 强制管道（DIRECT 无法换轨）：可解编码 REMUX（copy + 音频 aac），否则 TRANSCODE
+     *  - transcode 关闭 → 旧路径（按 ext direct/remux，零回归）
+     *  - transcode 开启 → vcodec 不可解 → TRANSCODE；可解/未知 → 旧路径 */
+    static Route decideRoute(String ext, String vcodec, boolean transcodeOn, Integer audioIdx) {
+        boolean playable = vcodec == null || vcodec.isBlank() || PLAYABLE_VCODECS.contains(vcodec.toLowerCase(Locale.ROOT));
+        if (audioIdx != null) return playable ? Route.REMUX : Route.TRANSCODE;
+        if (transcodeOn && !playable) return Route.TRANSCODE;
+        return isDirectExt(ext) ? Route.DIRECT : Route.REMUX;
+    }
+
     @GetMapping("/api/stream/{fileId}")
     public void stream(@PathVariable long fileId,
                        @RequestParam(required = false) Double t,
+                       @RequestParam(required = false) String transcode,
+                       @RequestParam(required = false) String preset,
+                       @RequestParam(required = false) Integer audio,
                        HttpServletRequest request,
                        HttpServletResponse response) throws IOException {
         MediaFileDto file = repo.findFile(fileId).orElse(null);
@@ -68,10 +97,13 @@ public class StreamController {
             return;
         }
 
-        if (isDirectExt(file.ext())) {
-            serveRange(path, file, request, response);
-        } else {
-            serveRemux(path, file, t, response);
+        boolean transcodeOn = "on".equalsIgnoreCase(transcode);
+        Integer audioIdx = audio != null && audio >= 0 ? audio : null;
+        Route route = decideRoute(file.ext(), file.vcodec(), transcodeOn, audioIdx);
+        switch (route) {
+            case DIRECT -> serveRange(path, file, request, response);
+            case REMUX -> serveRemux(path, file, t, audioIdx, response);
+            case TRANSCODE -> serveTranscode(path, file, t, audioIdx, preset, response);
         }
     }
 
@@ -126,7 +158,7 @@ public class StreamController {
 
     /* ── 转封装流（fMP4）── */
 
-    private void serveRemux(Path path, MediaFileDto file, Double t, HttpServletResponse response) throws IOException {
+    private void serveRemux(Path path, MediaFileDto file, Double t, Integer audioIdx, HttpServletResponse response) throws IOException {
         if (!remuxer.tryAcquire()) {
             response.sendError(503, "转封装并发已达上限（" + remuxer.maxConcurrent() + "），请稍后重试");
             return;
@@ -138,12 +170,42 @@ public class StreamController {
             response.setHeader("X-AV-Remux", "1");
             response.setHeader("X-AV-Duration", file.durationSec() == null ? "" : String.valueOf(file.durationSec()));
             // 无 Content-Length：chunked 流式输出
-            boolean ok = remuxer.pump(path.toAbsolutePath().toString(), seek, response.getOutputStream());
+            boolean ok = remuxer.pump(path.toAbsolutePath().toString(), seek, audioIdx, response.getOutputStream());
             if (!ok) {
                 log.warn("转封装未产出数据: {}（-ss={}）", file.name(), seek);
             }
         } finally {
             remuxer.release();
+        }
+    }
+
+    /* ── v0.28 P1 实时转码流（fMP4）── */
+
+    private void serveTranscode(Path path, MediaFileDto file, Double t, Integer audioIdx,
+                                String preset, HttpServletResponse response) throws IOException {
+        // 即时拒绝：转码会话分钟级长驻，排队等待无意义（503 文案引导用户稍后再试/关其他标签页）
+        if (!transcoder.tryAcquire()) {
+            response.sendError(503, "已有转码任务进行中（并发上限 " + transcoder.maxConcurrent() + "），请关闭其他播放页后重试");
+            return;
+        }
+        double seek = t != null && t > 0 ? t : 0;
+        String p = TranscodeStreamer.normalizePreset(preset);
+        log.info("转码播放: {}（{}p{}，preset={}，-ss={}）", file.name(),
+                file.height() == null ? "?" : file.height(),
+                audioIdx == null ? "" : "，音轨 " + audioIdx, p, seek);
+        try {
+            response.setStatus(200);
+            response.setContentType("video/mp4");
+            response.setHeader("X-AV-Transcode", "1");
+            response.setHeader("X-AV-Preset", p);
+            response.setHeader("X-AV-Duration", file.durationSec() == null ? "" : String.valueOf(file.durationSec()));
+            // 无 Content-Length：chunked 流式输出（转码无随机访问，seek 由 ?t= 重拉）
+            boolean ok = transcoder.pump(path.toAbsolutePath().toString(), seek, audioIdx, p, response.getOutputStream());
+            if (!ok) {
+                log.warn("转码未产出数据: {}（-ss={}）", file.name(), seek);
+            }
+        } finally {
+            transcoder.release();
         }
     }
 

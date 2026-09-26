@@ -21,11 +21,11 @@ public class SubscriptionRepository {
     public record SubRow(long id, long subjectId, String subjectName, String subjectNameCn,
                          boolean auto, int minEpisode, String ignoredFansubsJson, Integer autoScore,
                          String lastCheckError, Long lastCheckedAt, Long lastHitAt, long createdAt,
-                         String aiKeywordsJson) {}
+                         String aiKeywordsJson, String rssUrl) {}
 
     private static final String SUB_COLUMNS =
             "id, subject_id, subject_name, subject_name_cn, auto, min_episode, ignored_fansubs, auto_score, " +
-                    "last_check_error, last_checked_at, last_hit_at, created_at, ai_keywords";
+                    "last_check_error, last_checked_at, last_hit_at, created_at, ai_keywords, rss_url";
 
     public List<SubRow> listSubs() {
         return db.sql("SELECT " + SUB_COLUMNS + " FROM subscriptions ORDER BY id")
@@ -86,6 +86,16 @@ public class SubscriptionRepository {
         db.sql("UPDATE subscriptions SET ai_keywords = ? WHERE id = ?").param(aiKeywordsJson).param(id).update();
     }
 
+    /** v0.25 RSS 固定直链订阅源：null 不可走参数（同 setSubLastError 的 sqlite-jdbc null NPE 规避惯例）——
+     *  null = 清除直链（回关键词检索）；非空 = 直连源 URL（调用方已净化） */
+    public void setSubRssUrl(long id, String rssUrl) {
+        if (rssUrl == null) {
+            db.sql("UPDATE subscriptions SET rss_url = NULL WHERE id = ?").param(id).update();
+            return;
+        }
+        db.sql("UPDATE subscriptions SET rss_url = ? WHERE id = ?").param(rssUrl).param(id).update();
+    }
+
     /** 一轮检索结束：更新 last_checked_at；本轮有新命中时同时抬升 last_hit_at */
     public void markChecked(long id, Long hitAt) {
         if (hitAt == null) {
@@ -120,6 +130,7 @@ public class SubscriptionRepository {
         int score = rs.getInt("auto_score");
         boolean scoreNull = rs.wasNull();
         String lastErr = rs.getString("last_check_error");
+        String rssUrl = rs.getString("rss_url");
         return new SubRow(
                 rs.getLong("id"), rs.getLong("subject_id"),
                 rs.getString("subject_name"), rs.getString("subject_name_cn"),
@@ -127,7 +138,8 @@ public class SubscriptionRepository {
                 rs.getString("ignored_fansubs"),
                 scoreNull ? null : score, lastErr == null || lastErr.isBlank() ? null : lastErr,
                 checkedNull ? null : checked, hitNull ? null : hit, rs.getLong("created_at"),
-                rs.getString("ai_keywords"));
+                rs.getString("ai_keywords"),
+                rssUrl == null || rssUrl.isBlank() ? null : rssUrl.trim());
     }
 
     /* ── 命中台账（待确认队列 + 历史）── */
