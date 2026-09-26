@@ -43,6 +43,16 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         }
         if (!matches(provided)) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            // 401 必须带 CORS 头：否则浏览器把 401 呈现为 CORS 拦截（TypeError: Failed to fetch），
+            // 前端永远拿不到 401 状态、无法给出「Token 不正确」精确文案（v0.14 起欠账；
+            // 桌面版多代数据场景 localStorage 残留旧 Token 时必现「媒体服务不可达」假象）
+            String origin = request.getHeader("Origin");
+            if (origin != null && !origin.isBlank()) {
+                response.setHeader("Access-Control-Allow-Origin", origin);
+                response.setHeader("Access-Control-Allow-Headers", "X-AV-Token, Content-Type, Authorization");
+                response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+                response.addHeader("Vary", "Origin");
+            }
             response.setContentType("application/json;charset=UTF-8");
             response.getWriter().write("{\"error\":\"unauthorized\",\"message\":\"Token 缺失或不正确\"}");
             return;
