@@ -26,9 +26,12 @@ av:
     # 服务端自定义合规 UA（官方 API 要求可识别的 User-Agent）
     user-agent: "AnimeViewerService/${project.version} (personal media server; https://github.com/jinfenglong/AnimeViewer)"
     match-throttle-ms: 400
-    # 网络线路：auto（默认，直连失败自动经代理重试并粘性记忆）/ direct（仅直连）/ proxy（仅代理）
+    # 网络线路：auto（默认，直连失败自动经代理重试并粘性记忆）/ direct（仅直连）/ proxy（仅代理）。
+    # v1.0 补记四：运行期可在前端设置页覆盖（GET/PUT /api/network/settings，存 SQLite settings 表
+    # key=network，保存即时生效无需重启）——此处仅为默认值
     proxy-mode: auto
-    # 代理地址（auto 容灾与 proxy 模式使用；默认 Clash Verge 混合端口 7897，按实际修改）
+    # 代理地址（auto 容灾与 proxy 模式使用；默认 Clash Verge 混合端口 7897，按实际修改）。
+    # 消费方：Bangumi 匹配 / 订阅检索 / 在线解析 / 在线流转发 / 种子抓取（aria2 下载代理为独立配置 av.aria2.proxy）
     proxy-host: 127.0.0.1
     proxy-port: 7897
   scan:
@@ -71,7 +74,7 @@ av:
     # 注入磁力的公共 tracker（逗号分隔；磁力自带 tracker 之外追加——无 tracker 磁力依赖 DHT 极慢）。
     # v1.0 桌面版实测（2026-09-26）：UDP 直连出国全超时、HTTP 直连劣化，默认换 HTTP tracker——
     # 配合 proxy 经代理 announce 全部可达（旧默认 UDP 列表对存量实例无效，请在设置页自行替换）
-    trackers: "http://tracker2.dler.org:80/announce,http://tracker.bt4g.com:2095/announce,http://tracker.gbitt.info:80/announce,http://tracker.openbittorrent.com:80/announce,http://open.acgnxtracker.com:80/announce"
+    trackers: "udp://tracker.opentrackr.org:1337/announce,udp://tracker.openbittorrent.com:6969/announce,udp://exodus.desync.com:6969/announce"
     # v1.0 下载代理（可空 = 直连）：非空时拉起 aria2 注入 --all-proxy，HTTP(S) tracker announce 走此代理。
     # aria2 不读系统代理，国内网络 UDP tracker/DHT 直连出国常全超时（桌面版实测）；本机 Clash 场景填
     # http://127.0.0.1:7897。注意：UDP tracker/DHT 为 aria2 协议限制不走 HTTP 代理，需 UDP 可达请开代理软件 TUN 模式

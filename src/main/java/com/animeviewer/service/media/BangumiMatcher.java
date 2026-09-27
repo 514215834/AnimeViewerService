@@ -1,6 +1,8 @@
 package com.animeviewer.service.media;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.config.NetworkSettings;
+import com.animeviewer.service.config.NetworkSettingsProvider;
 import com.animeviewer.service.model.Dtos.BangumiEpisodeDto;
 import com.animeviewer.service.model.Dtos.BangumiSubjectDto;
 import com.animeviewer.service.model.Dtos.MatchOutcome;
@@ -20,51 +22,67 @@ import java.util.Map;
  *  高置信（归一化后全等）自动绑定，否则进入「待确认」并保存最佳候选。
  *  服务端直连无 CORS，且使用合规自定义 UA（迭代文档 §3.3-3 浏览器 UA 限制的绕开）。
  *  网络线路：proxy-mode = direct（仅直连）/ proxy（仅代理）/ auto（默认——直连失败自动经代理重试，
- *  可用线路粘性记忆；墙内直连被重置 + 本机 Clash 的典型环境下开箱即用，无需额外启动参数）。 */
+ *  可用线路粘性记忆；墙内直连被重置 + 本机 Clash 的典型环境下开箱即用，无需额外启动参数）。
+ *  v1.0 补记四：线路运行期可改（设置页 PUT /api/network/settings），ensureClients 按版本号重建。 */
 @Component
 public class BangumiMatcher {
 
     private static final Logger log = LoggerFactory.getLogger(BangumiMatcher.class);
 
     private final ServiceProperties props;
-    private final RestClient restDirect;
-    private final RestClient restProxy;
-    private final boolean proxyOnly;
-    private final boolean autoFailover;
+    private final NetworkSettingsProvider network;
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, CacheEntry> searchCache = new LinkedHashMap<>();
     private long lastRequestAt = 0;
     /** auto 模式的粘性线路记忆：true = 上次成功走的是代理 */
     private volatile boolean useProxy = false;
 
+    /** v1.0 补记四：线路设置运行期可改（设置页保存即生效）——按 Provider 版本号懒重建客户端 */
+    private volatile long appliedVersion = -1;
+    private volatile RestClient restDirect;
+    private volatile RestClient restProxy;
+    private volatile boolean proxyOnly;
+    private volatile boolean autoFailover;
+
     private record CacheEntry(List<BangumiSubjectDto> results, long at) {}
 
-    public BangumiMatcher(ServiceProperties props) {
+    public BangumiMatcher(ServiceProperties props, NetworkSettingsProvider network) {
         this.props = props;
-        String mode = props.bangumi().proxyMode() == null ? "auto" : props.bangumi().proxyMode().trim().toLowerCase();
-        String host = props.bangumi().proxyHost();
-        boolean hasProxy = host != null && !host.isBlank() && props.bangumi().proxyPort() != null;
-        if ("proxy".equals(mode) && !hasProxy) {
-            log.warn("av.bangumi.proxy-mode=proxy 但未配置代理地址，退化为 auto 模式");
-            mode = "auto";
+        this.network = network;
+        ensureClients();
+    }
+
+    /** 线路设置变更（版本号不同）时重建 RestClient；每次请求入口调用，热路径只有一次版本号比较 */
+    private void ensureClients() {
+        long v = network.version();
+        if (v == appliedVersion) return;
+        synchronized (this) {
+            if (v == appliedVersion) return;
+            NetworkSettings s = network.current();
+            String mode = s.proxyMode() == null ? "auto" : s.proxyMode();
+            boolean hasProxy = s.hasProxy();
+            if ("proxy".equals(mode) && !hasProxy) {
+                log.warn("网络线路 mode=proxy 但未配置代理地址，退化为 auto 模式");
+                mode = "auto";
+            }
+            this.proxyOnly = "proxy".equals(mode);
+            this.autoFailover = !this.proxyOnly && !"direct".equals(mode);
+            this.restDirect = buildClient(null, null);
+            this.restProxy = hasProxy ? buildClient(s.proxyHost(), s.proxyPort()) : null;
+            this.appliedVersion = v;
+            log.info("Bangumi 线路模式: {}（代理: {}）", mode, hasProxy ? s.proxyHost() + ":" + s.proxyPort() : "未配置");
         }
-        this.proxyOnly = "proxy".equals(mode);
-        this.autoFailover = !this.proxyOnly && !"direct".equals(mode);
-        this.restDirect = buildClient(false);
-        this.restProxy = hasProxy ? buildClient(true) : null;
-        log.info("Bangumi 线路模式: {}（代理: {}）", mode, hasProxy ? host + ":" + props.bangumi().proxyPort() : "未配置");
     }
 
     /** v0.27 C1（补记四回退件复用，见 §5N 补记六承诺）：SimpleClientHttpRequestFactory（HttpURLConnection）
      *  经代理访问 api.bgm.tv 稳定 502（curl / JDK HttpClient 同代理均 200 实锤）→ 换 JdkClientHttpRequestFactory
      *  （与 HanimeService 同款 java.net.http.HttpClient）；显式 connect 5s / read 20s——原 Simple 工厂零超时，
      *  直连 DNS 污染时挂 OS 层 SYN 超时 ~21s 才切线路。exchange 尝试次数维持现状（2 次）不变。 */
-    private RestClient buildClient(boolean viaProxy) {
+    private RestClient buildClient(String proxyHost, Integer proxyPort) {
         java.net.http.HttpClient.Builder cb = java.net.http.HttpClient.newBuilder()
                 .connectTimeout(java.time.Duration.ofSeconds(5));
-        if (viaProxy) {
-            cb.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(
-                    props.bangumi().proxyHost(), props.bangumi().proxyPort())));
+        if (proxyHost != null) {
+            cb.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(proxyHost, proxyPort)));
         }
         var factory = new org.springframework.http.client.JdkClientHttpRequestFactory(cb.build());
         factory.setReadTimeout(java.time.Duration.ofSeconds(20));
@@ -78,6 +96,7 @@ public class BangumiMatcher {
 
     /** 统一请求执行：auto 模式下连接级失败（ResourceAccessException）自动切换线路重试一次，成功线路粘性记忆 */
     private String exchange(java.util.function.Function<RestClient, String> call) {
+        ensureClients();
         if (!autoFailover) {
             return call.apply(proxyOnly ? restProxy : restDirect);
         }

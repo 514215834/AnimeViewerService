@@ -1,6 +1,7 @@
 package com.animeviewer.service.stream;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.config.NetworkSettingsProvider;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,13 +31,16 @@ public class RangeForwarder {
 
     private final HttpClient client;
     private final ServiceProperties props;
+    private final NetworkSettingsProvider network;
     private final String userAgent;
     /** v0.26 HN3 在线视频容灾转发的粘性线路记忆（true = 上次成功走代理） */
     private volatile boolean failoverUsedProxy = false;
     private volatile HttpClient proxyClient;
+    private volatile long proxyClientVersion = -1;
 
-    public RangeForwarder(ServiceProperties props, HttpClient client) {
+    public RangeForwarder(ServiceProperties props, NetworkSettingsProvider network, HttpClient client) {
         this.props = props;
+        this.network = network;
         this.client = client;
         this.userAgent = props.bangumi().userAgent();
     }
@@ -65,8 +69,9 @@ public class RangeForwarder {
                                    HttpServletResponse response,
                                    UnaryOperator<String> playlistRewriter,
                                    java.util.Map<String, String> extraHeaders) throws IOException, InterruptedException {
-        boolean proxyOnly = "proxy".equalsIgnoreCase(props.bangumi().proxyMode());
-        boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+        // v1.0 补记四：线路设置运行期可改（设置页保存即生效），每次转发读当前值
+        boolean proxyOnly = "proxy".equalsIgnoreCase(network.current().proxyMode());
+        boolean directOnly = "direct".equalsIgnoreCase(network.current().proxyMode());
         IOException last = null;
         boolean tryProxy = failoverUsedProxy && !directOnly;
         for (int attempt = 0; attempt < 2; attempt++) {
@@ -114,20 +119,21 @@ public class RangeForwarder {
                 || msg.contains("Software caused connection abort");
     }
 
-    /** av.bangumi 代理地址的 HttpClient（懒加载；未配置代理返回 null） */
+    /** 后端出口代理的 HttpClient（懒加载；未配置代理返回 null。
+     *  v1.0 补记四：按 Provider 版本号重建，设置页改代理即时生效） */
     private HttpClient proxyClient() {
-        if (proxyClient != null) return proxyClient;
-        String host = props.bangumi().proxyHost();
-        Integer port = props.bangumi().proxyPort();
-        if (host == null || host.isBlank() || port == null) return null;
+        var s = network.current();
+        if (!s.hasProxy()) return null;
+        long v = network.version();
+        if (proxyClient != null && proxyClientVersion == v) return proxyClient;
         synchronized (this) {
-            if (proxyClient == null) {
-                proxyClient = java.net.http.HttpClient.newBuilder()
-                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
-                        .connectTimeout(Duration.ofSeconds(10))
-                        .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(host, port)))
-                        .build();
-            }
+            if (proxyClient != null && proxyClientVersion == v) return proxyClient;
+            proxyClient = java.net.http.HttpClient.newBuilder()
+                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(s.proxyHost(), s.proxyPort())))
+                    .build();
+            proxyClientVersion = v;
             return proxyClient;
         }
     }

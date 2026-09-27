@@ -1,6 +1,8 @@
 package com.animeviewer.service.download;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.config.NetworkSettings;
+import com.animeviewer.service.config.NetworkSettingsProvider;
 import com.animeviewer.service.media.LibraryScanner;
 import com.animeviewer.service.download.DownloadEngine.TaskSnapshot;
 import com.animeviewer.service.model.Dtos.DownloadAddRequest;
@@ -53,6 +55,7 @@ public class DownloadService {
     private final MediaRepository mediaRepo;
     private final LibraryScanner scanner;
     private final ServiceProperties props;
+    private final NetworkSettingsProvider network;
     private final ApplicationEventPublisher events;
 
     private Thread watcher;
@@ -62,7 +65,7 @@ public class DownloadService {
     public DownloadService(DownloadRepository repo, Aria2Engine aria2Engine, Aria2Adapter aria2,
                            DownloadEngineRouter router, MediaRepository mediaRepo,
                            LibraryScanner scanner, ServiceProperties props,
-                           ApplicationEventPublisher events) {
+                           NetworkSettingsProvider network, ApplicationEventPublisher events) {
         this.repo = repo;
         this.aria2Engine = aria2Engine;
         this.aria2 = aria2;
@@ -70,6 +73,7 @@ public class DownloadService {
         this.mediaRepo = mediaRepo;
         this.scanner = scanner;
         this.props = props;
+        this.network = network;
         this.events = events;
     }
 
@@ -499,7 +503,7 @@ public class DownloadService {
         Exception lastError = null;
         boolean tryProxy = false;
         for (int attempt = 0; attempt < 2; attempt++) {
-            boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+            boolean directOnly = "direct".equalsIgnoreCase(network.current().proxyMode());
             boolean useProxy = !directOnly && tryProxy;
             if (useProxy && torrentProxyClient() == null) {
                 tryProxy = false;
@@ -537,22 +541,24 @@ public class DownloadService {
                 + (lastError == null ? "未知错误" : lastError.getMessage() == null ? lastError.toString() : lastError.getMessage()));
     }
 
-    /** av.bangumi 代理地址的 HttpClient（懒加载，复用服务代理配置；未配置返回 null） */
+    /** 后端出口代理的 HttpClient（懒加载，复用服务网络线路配置；未配置返回 null；
+     *  v1.0 补记四：按 Provider 版本号重建，设置页改代理即时生效） */
     private volatile java.net.http.HttpClient torrentProxyClient;
+    private volatile long torrentProxyClientVersion = -1;
 
     private java.net.http.HttpClient torrentProxyClient() {
-        if (torrentProxyClient != null) return torrentProxyClient;
-        String host = props.bangumi().proxyHost();
-        Integer port = props.bangumi().proxyPort();
-        if (host == null || host.isBlank() || port == null) return null;
+        NetworkSettings s = network.current();
+        if (!s.hasProxy()) return null;
+        long v = network.version();
+        if (torrentProxyClient != null && torrentProxyClientVersion == v) return torrentProxyClient;
         synchronized (this) {
-            if (torrentProxyClient == null) {
-                torrentProxyClient = java.net.http.HttpClient.newBuilder()
-                        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
-                        .connectTimeout(java.time.Duration.ofSeconds(10))
-                        .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(host, port)))
-                        .build();
-            }
+            if (torrentProxyClient != null && torrentProxyClientVersion == v) return torrentProxyClient;
+            torrentProxyClient = java.net.http.HttpClient.newBuilder()
+                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+                    .connectTimeout(java.time.Duration.ofSeconds(10))
+                    .proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(s.proxyHost(), s.proxyPort())))
+                    .build();
+            torrentProxyClientVersion = v;
             return torrentProxyClient;
         }
     }

@@ -3,6 +3,7 @@ package com.animeviewer.service.resource;
 import com.animeviewer.service.ServiceProperties;
 import com.animeviewer.service.ai.AiPrompts;
 import com.animeviewer.service.ai.AiService;
+import com.animeviewer.service.config.NetworkSettingsProvider;
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadRepository;
 import com.animeviewer.service.download.DownloadService;
@@ -69,11 +70,13 @@ public class ResourceService {
     private final DownloadRepository repo;
     private final DownloadService downloads;
     private final ServiceProperties props;
+    private final NetworkSettingsProvider network;
     private final HttpClient client;
     /** v0.30 补记一：站点配置 AI 解析（aiFillSite LLM 兜底用） */
     private final AiService ai;
     /** 代理线路（懒加载；acgnx 实测 DNS 污染直连超时——探测定案：抓取走直连/代理自动容灾） */
     private volatile HttpClient proxyClient;
+    private volatile long proxyClientVersion = -1;
 
     private final Map<String, CacheEntry> cache = new LinkedHashMap<>();
     private volatile long lastFetchAt = 0;
@@ -81,12 +84,14 @@ public class ResourceService {
     private record CacheEntry(List<ResourceItemDto> items, long at) {}
 
     public ResourceService(DownloadRepository repo, DownloadService downloads,
-                           ServiceProperties props, HttpClient client, AiService ai) {
+                           ServiceProperties props, HttpClient client, AiService ai,
+                           NetworkSettingsProvider network) {
         this.repo = repo;
         this.downloads = downloads;
         this.props = props;
         this.client = client;
         this.ai = ai;
+        this.network = network;
     }
 
     /* ── v0.30 补记一：AI 解析站点接入配置（站点管理「AI 解析」按钮）── */
@@ -295,8 +300,9 @@ public class ResourceService {
     /** 直连/代理自动容灾（对齐 BangumiMatcher auto 模式）：直连失败（连接级异常）自动经代理重试一次，
      *  成功线路粘性记忆；proxy-mode=direct 时不走代理。 */
     private String fetchViaFailover(String url) throws Exception {
-        boolean proxyOnly = "proxy".equalsIgnoreCase(props.bangumi().proxyMode());
-        boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+        // v1.0 补记四：线路设置运行期可改（设置页保存即生效），每次抓取读当前值
+        boolean proxyOnly = "proxy".equalsIgnoreCase(network.current().proxyMode());
+        boolean directOnly = "direct".equalsIgnoreCase(network.current().proxyMode());
         Exception lastError = null;
         // 首选线路：粘性记忆（默认直连）
         boolean tryProxy = lastFetchUsedProxy && !directOnly;
@@ -331,20 +337,21 @@ public class ResourceService {
         throw lastError != null ? lastError : new DownloadException(502, "抓取失败");
     }
 
-    /** av.bangumi 代理地址的 HttpClient（懒加载；未配置代理返回 null） */
+    /** 后端出口代理的 HttpClient（懒加载；未配置代理返回 null。
+     *  v1.0 补记四：按 Provider 版本号重建，设置页改代理即时生效） */
     private HttpClient proxyHttpClient() {
-        if (proxyClient != null) return proxyClient;
-        String host = props.bangumi().proxyHost();
-        Integer port = props.bangumi().proxyPort();
-        if (host == null || host.isBlank() || port == null) return null;
+        var s = network.current();
+        if (!s.hasProxy()) return null;
+        long v = network.version();
+        if (proxyClient != null && proxyClientVersion == v) return proxyClient;
         synchronized (this) {
-            if (proxyClient == null) {
-                proxyClient = HttpClient.newBuilder()
-                        .followRedirects(HttpClient.Redirect.NORMAL)
-                        .connectTimeout(Duration.ofSeconds(10))
-                        .proxy(ProxySelector.of(new java.net.InetSocketAddress(host, port)))
-                        .build();
-            }
+            if (proxyClient != null && proxyClientVersion == v) return proxyClient;
+            proxyClient = HttpClient.newBuilder()
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .proxy(ProxySelector.of(new java.net.InetSocketAddress(s.proxyHost(), s.proxyPort())))
+                    .build();
+            proxyClientVersion = v;
             return proxyClient;
         }
     }

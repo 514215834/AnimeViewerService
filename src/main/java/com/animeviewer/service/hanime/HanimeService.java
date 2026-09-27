@@ -1,6 +1,7 @@
 package com.animeviewer.service.hanime;
 
 import com.animeviewer.service.ServiceProperties;
+import com.animeviewer.service.config.NetworkSettingsProvider;
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.download.DownloadRepository;
 import com.animeviewer.service.model.Dtos.HanimeConfigDto;
@@ -66,18 +67,22 @@ public class HanimeService {
     private final DownloadRepository repo;
     private final HttpClient client;
     private final ServiceProperties props;
+    private final NetworkSettingsProvider network;
     private final ObjectMapper mapper;
     private volatile HttpClient proxyClient;
+    private volatile long proxyClientVersion = -1;
     private volatile boolean lastUsedProxy = false;
     private volatile String lastGoodHost = HOST_PRIMARY;
     private final Map<String, CachedWatch> watchCache = new LinkedHashMap<>();
 
     private record CachedWatch(HanimeWatchDto detail, long at) {}
 
-    public HanimeService(DownloadRepository repo, HttpClient client, ServiceProperties props, ObjectMapper mapper) {
+    public HanimeService(DownloadRepository repo, HttpClient client, ServiceProperties props,
+                         NetworkSettingsProvider network, ObjectMapper mapper) {
         this.repo = repo;
         this.client = client;
         this.props = props;
+        this.network = network;
         this.mapper = mapper;
     }
 
@@ -126,8 +131,9 @@ public class HanimeService {
         String[] hosts = HOST_PRIMARY.equals(lastGoodHost)
                 ? new String[]{HOST_PRIMARY, HOST_FALLBACK}
                 : new String[]{HOST_FALLBACK, HOST_PRIMARY};
-        boolean proxyOnly = "proxy".equalsIgnoreCase(props.bangumi().proxyMode());
-        boolean directOnly = "direct".equalsIgnoreCase(props.bangumi().proxyMode());
+        // v1.0 补记四：线路设置运行期可改（设置页保存即生效），每次抓取读当前值
+        boolean proxyOnly = "proxy".equalsIgnoreCase(network.current().proxyMode());
+        boolean directOnly = "direct".equalsIgnoreCase(network.current().proxyMode());
         Exception lastError = null;
         Config cfg = config();
         for (String host : hosts) {
@@ -182,19 +188,21 @@ public class HanimeService {
         throw new DownloadException(502, "抓取失败：" + (lastError != null ? lastError.getMessage() : "未知原因"));
     }
 
+    /** 后端出口代理的 HttpClient（懒加载；未配置代理返回 null。
+     *  v1.0 补记四：按 Provider 版本号重建，设置页改代理即时生效） */
     private HttpClient proxyClient() {
-        if (proxyClient != null) return proxyClient;
-        String host = props.bangumi().proxyHost();
-        Integer port = props.bangumi().proxyPort();
-        if (host == null || host.isBlank() || port == null) return null;
+        var s = network.current();
+        if (!s.hasProxy()) return null;
+        long v = network.version();
+        if (proxyClient != null && proxyClientVersion == v) return proxyClient;
         synchronized (this) {
-            if (proxyClient == null) {
-                proxyClient = HttpClient.newBuilder()
-                        .followRedirects(HttpClient.Redirect.NORMAL)
-                        .connectTimeout(Duration.ofSeconds(10))
-                        .proxy(ProxySelector.of(new InetSocketAddress(host, port)))
-                        .build();
-            }
+            if (proxyClient != null && proxyClientVersion == v) return proxyClient;
+            proxyClient = HttpClient.newBuilder()
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .proxy(ProxySelector.of(new InetSocketAddress(s.proxyHost(), s.proxyPort())))
+                    .build();
+            proxyClientVersion = v;
             return proxyClient;
         }
     }

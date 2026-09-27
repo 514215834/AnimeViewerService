@@ -90,6 +90,9 @@ public final class Dtos {
                                       String uploadLimit, List<String> trackers, boolean autoScan,
                                       int seedTimeMinutes, boolean checkCertificate, String proxy) {}
 
+    /** v1.0 补记四 后端出口网络设置（线路模式 + 代理地址；GET/PUT /api/network/settings） */
+    public record NetworkSettingsDto(String proxyMode, String proxyHost, Integer proxyPort) {}
+
     /* ── v0.17 R1/R2 资源发现（RSS 站点源 + 条目找资源）── */
 
     /** v0.24 SE1：magnet 可空（种子型站点 nyaa/蜜柑 enclosure 为 .torrent 直链，无磁力）；
