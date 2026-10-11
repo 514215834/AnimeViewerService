@@ -98,6 +98,14 @@ public class HanimeVerifyService {
 
     /** 校验代理主入口：GET/POST 皆经此转发 */
     public void forward(HttpServletRequest req, HttpServletResponse resp, String subPath) throws IOException {
+        // 浏览器侧 Cookie（CF 质询平台会经 document.cookie 写部分 cf_chl_* 上下文）并入 jar 再转发——
+        // 只认服务端 jar 会丢这类 Cookie，质询 flow 会循环打回（2026-10-11 实测）
+        String browserCookie = req.getHeader("Cookie");
+        if (browserCookie != null && !browserCookie.isBlank()) {
+            synchronized (this) {
+                mergeCookies(browserCookie);
+            }
+        }
         String sitePath = subPath == null || subPath.isBlank() ? "/" : (subPath.startsWith("/") ? subPath : "/" + subPath);
         String query = req.getQueryString();
         String target = SITE_HOST + sitePath + (query == null || query.isBlank() ? "" : "?" + query);
@@ -125,7 +133,6 @@ public class HanimeVerifyService {
             String v = req.getHeader(h);
             if (v != null && !v.isBlank()) rb.header(h, v);
         }
-
         HttpResponse<byte[]> res;
         try {
             res = proxyClient.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
@@ -148,29 +155,28 @@ public class HanimeVerifyService {
             return;
         }
 
-        String contentType = res.headers().firstValue("content-type").orElse("application/octet-stream");
-        if (contentType.contains("text/html")) {
-            byte[] body = res.body();
-            if (body.length > MAX_HTML_BYTES) {
-                resp.sendError(502, "校验代理页面超出大小上限");
+            String contentType = res.headers().firstValue("content-type").orElse("application/octet-stream");
+            if (contentType.contains("text/html")) {
+                byte[] body = res.body();
+                if (body.length > MAX_HTML_BYTES) {
+                    resp.sendError(502, "校验代理页面超出大小上限");
+                    return;
+                }
+                String html = new String(body, StandardCharsets.UTF_8);
+                boolean challenge = html.contains(CHALLENGE_MARKER);
+                boolean blocked = html.contains(BLOCKED_MARKER_1) || html.contains(BLOCKED_MARKER_2);
+                if (!challenge && !blocked) {
+                    persistIfChanged(visitorUa);
+                } else {
+                    log.info("校验窗口呈现{}（jar={}）", challenge ? "人机质询" : "封锁页", cookieJar.keySet());
+                }
+                html = rewriteUrl(html, req);
+                resp.setStatus(res.statusCode());
+                resp.setContentType(contentType);
+                resp.setCharacterEncoding("UTF-8");
+                resp.getOutputStream().write(html.getBytes(StandardCharsets.UTF_8));
                 return;
             }
-            String html = new String(body, StandardCharsets.UTF_8);
-            boolean challenge = html.contains(CHALLENGE_MARKER);
-            boolean blocked = html.contains(BLOCKED_MARKER_1) || html.contains(BLOCKED_MARKER_2);
-            if (!challenge && !blocked) {
-                persistIfChanged(visitorUa);
-            } else {
-                log.info("校验窗口呈现{}（jar={}）", challenge ? "人机质询" : "封锁页", cookieJar.keySet());
-            }
-            html = rewriteUrl(html, req);
-            html = injectBase(html, req);
-            resp.setStatus(res.statusCode());
-            resp.setContentType(contentType);
-            resp.setCharacterEncoding("UTF-8");
-            resp.getOutputStream().write(html.getBytes(StandardCharsets.UTF_8));
-            return;
-        }
 
         // 非 HTML（css/js/图片等站点资源）：透传
         resp.setStatus(res.statusCode());
@@ -246,13 +252,18 @@ public class HanimeVerifyService {
 
     /* ── URL 重写 ── */
 
-    /** 站点绝对/协议相对 URL → 本代理路径（HTML 正文与 Location 共用）；其余（CDN 域等）原样 */
+    /** 站点绝对/协议相对 URL → 本代理命名空间（HTML 正文与 Location 共用）。
+     *  v0.33 实测修订：CF 编排脚本 replaceState 到根路径后，动态创建的脚本 src 按站点根解析，
+     *  `<base>` 注入管不住（脚本 404 → 质询页空白）——根路径网关（/**）落地后重写目标统一为 "/"；
+     *  经 /api/hanime/verify/{token} 旧路由进来的请求保留 token 前缀重写。其余（CDN 域等）原样。 */
     private String rewriteUrl(String s, HttpServletRequest req) {
-        // token 段从请求 URI 提取：/api/hanime/verify/{token}/...
+        String prefix = "/";
         String uri = req.getRequestURI();
-        String rest = uri.substring(VERIFY_PREFIX.length());
-        String token = rest.contains("/") ? rest.substring(0, rest.indexOf('/')) : rest;
-        String prefix = VERIFY_PREFIX + token;
+        if (uri.startsWith(VERIFY_PREFIX)) {
+            String rest = uri.substring(VERIFY_PREFIX.length());
+            String token = rest.contains("/") ? rest.substring(0, rest.indexOf('/')) : rest;
+            if (!token.isBlank()) prefix = VERIFY_PREFIX + token;
+        }
         return s.replace("https://hanime1.me", prefix)
                 .replace("https://hanime1.com", prefix)
                 .replace("http://hanime1.me", prefix)
@@ -261,19 +272,5 @@ public class HanimeVerifyService {
                 .replace("https:\\/\\/hanime1.com", prefix.replace("/", "\\/"))
                 .replace("//hanime1.me", prefix)
                 .replace("//hanime1.com", prefix);
-    }
-
-    /** 注入 {@code <base>}：站点根相对资源（/cdn-cgi/**、/assets/**）自动落回代理命名空间 */
-    private String injectBase(String html, HttpServletRequest req) {
-        String uri = req.getRequestURI();
-        String rest = uri.substring(VERIFY_PREFIX.length());
-        String token = rest.contains("/") ? rest.substring(0, rest.indexOf('/')) : rest;
-        String base = "<base href=\"" + VERIFY_PREFIX + token + "/\">";
-        if (html.contains("<base ")) return html;
-        int idx = html.indexOf("<head");
-        if (idx < 0) return html;
-        int gt = html.indexOf('>', idx);
-        if (gt < 0) return html;
-        return html.substring(0, gt + 1) + base + html.substring(gt + 1);
     }
 }
