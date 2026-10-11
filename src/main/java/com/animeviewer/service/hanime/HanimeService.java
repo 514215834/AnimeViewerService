@@ -56,10 +56,11 @@ public class HanimeService {
     private static final String BLOCKED_MSG =
             "站点 WAF 拒绝了服务端出口——请为服务端配置住宅出口代理；若浏览器可正常访问，粘贴浏览器 Cookie 后重试";
 
-    /** KV 配置（settings 表 key=hanime）：cookie 为浏览器复制的原始 Cookie 串（含 cf_clearance / 登录态） */
-    public record Config(boolean enabled, String ua, String cookie) {
+    /** KV 配置（settings 表 key=hanime）：cookie 为浏览器复制的原始 Cookie 串（含 cf_clearance / 登录态）；
+     *  v0.33 cookieUpdatedAt = 校验代理自动回填或手动保存的最后时间（前端轮询感知回填成功） */
+    public record Config(boolean enabled, String ua, String cookie, long cookieUpdatedAt) {
         static Config defaults() {
-            return new Config(false, DEFAULT_UA, "");
+            return new Config(false, DEFAULT_UA, "", 0L);
         }
     }
 
@@ -91,7 +92,8 @@ public class HanimeService {
             String ua = n.path("ua").asText("").trim();
             return new Config(n.path("enabled").asBoolean(false),
                     ua.isEmpty() ? DEFAULT_UA : ua,
-                    n.path("cookie").asText(""));
+                    n.path("cookie").asText(""),
+                    n.path("cookieUpdatedAt").asLong(0L));
         } catch (Exception e) {
             log.warn("hanime 配置读取失败（{}），按默认处理", e.toString());
             return Config.defaults();
@@ -104,18 +106,25 @@ public class HanimeService {
         String nextUa = ua != null ? ua.trim() : cur.ua();
         String nextCookie = cookie != null ? cookie.trim() : cur.cookie();
         if (nextUa.isEmpty()) nextUa = DEFAULT_UA;
+        // cookie 实际变更（校验代理回填 / 手动粘贴 / 清除）才刷新时间戳——前端轮询以此感知回填成功
+        long ts = cookie != null && !nextCookie.equals(cur.cookie()) ? System.currentTimeMillis() : cur.cookieUpdatedAt();
         try {
             repo.putSetting(CONFIG_KEY, mapper.writeValueAsString(
-                    Map.of("enabled", en, "ua", nextUa, "cookie", nextCookie)));
+                    Map.of("enabled", en, "ua", nextUa, "cookie", nextCookie, "cookieUpdatedAt", ts)));
         } catch (Exception e) {
             throw new DownloadException(500, "配置写入失败：" + e.getMessage());
         }
-        return new Config(en, nextUa, nextCookie);
+        return new Config(en, nextUa, nextCookie, ts);
+    }
+
+    /** v0.33 校验代理回填（§5U）：自动捕获的 Cookie jar + 浏览器真实 UA */
+    public Config saveVerifyResult(String ua, String cookie) {
+        return saveConfig(null, ua, cookie);
     }
 
     public HanimeConfigDto configDto() {
         Config c = config();
-        return new HanimeConfigDto(c.enabled(), c.ua(), !c.cookie().isBlank());
+        return new HanimeConfigDto(c.enabled(), c.ua(), !c.cookie().isBlank(), c.cookieUpdatedAt());
     }
 
     /* ── 抓取（host × 线路四组合容灾）── */

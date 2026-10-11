@@ -193,8 +193,8 @@ public final class Dtos {
 
     /* ── v0.26 HN1/HN2 hanime1.me 在线解析（配置 / 搜索 / 视频解析）── */
 
-    /** 配置回显：cookie 不回传明文（只回 hasCookie） */
-    public record HanimeConfigDto(boolean enabled, String ua, boolean hasCookie) {}
+    /** 配置回显：cookie 不回传明文（只回 hasCookie）；cookieUpdatedAt 供前端轮询感知校验代理自动回填（v0.33） */
+    public record HanimeConfigDto(boolean enabled, String ua, boolean hasCookie, long cookieUpdatedAt) {}
 
     /** 配置更新：null=不改动（cookie 空串=清除） */
     public record HanimeConfigUpdateRequest(Boolean enabled, String ua, String cookie) {}

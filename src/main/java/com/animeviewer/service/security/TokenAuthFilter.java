@@ -31,6 +31,9 @@ public class TokenAuthFilter extends OncePerRequestFilter {
         // 健康检查放行（连接测试的第一步）；CORS 预检放行；非 /api 路径放行
         if (path.equals("/api/health")) return true;
         if ("OPTIONS".equalsIgnoreCase(request.getMethod())) return true;
+        // v0.33 校验代理放行：token 在路径段内，由 HanimeVerifyService 常量时间自校验
+        //（弹窗整站资源（含站点根相对路径与重定向链）无法逐个携带 X-AV-Token 头，路径段是唯一可行载体）
+        if (path.startsWith("/api/hanime/verify/")) return true;
         return !path.startsWith("/api/");
     }
 

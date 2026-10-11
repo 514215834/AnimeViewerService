@@ -2,6 +2,7 @@ package com.animeviewer.service.api;
 
 import com.animeviewer.service.download.DownloadException;
 import com.animeviewer.service.hanime.HanimeService;
+import com.animeviewer.service.hanime.HanimeVerifyService;
 import com.animeviewer.service.ServiceProperties;
 import com.animeviewer.service.model.Dtos.HanimeConfigDto;
 import com.animeviewer.service.model.Dtos.HanimeConfigUpdateRequest;
@@ -39,12 +40,15 @@ import java.util.concurrent.TimeUnit;
 public class HanimeController {
 
     private final HanimeService service;
+    private final HanimeVerifyService verifyService;
     private final RangeForwarder forwarder;
     private final Semaphore streamPermits;
     private final int maxStreamConcurrent;
 
-    public HanimeController(HanimeService service, RangeForwarder forwarder, ServiceProperties props) {
+    public HanimeController(HanimeService service, HanimeVerifyService verifyService,
+                            RangeForwarder forwarder, ServiceProperties props) {
         this.service = service;
+        this.verifyService = verifyService;
         this.forwarder = forwarder;
         this.maxStreamConcurrent = props.stream() == null || props.stream().hanimeMaxConcurrent() == null
                 ? 2 : Math.max(1, props.stream().hanimeMaxConcurrent());
@@ -66,6 +70,39 @@ public class HanimeController {
     @PostMapping("/test")
     public HanimeTestDto test() {
         return service.test();
+    }
+
+    /* ── v0.33（§5U）人机校验反向代理：弹窗打开 /verify/{token}/…，全程代理站点，自动回填 Cookie+UA ──
+     *  鉴权：TokenAuthFilter 对 /api/hanime/verify/ 放行（弹窗内整站资源无法带自定义头），token 取
+     *  路径第一段由 HanimeVerifyService 常量时间自校验；wildcard 尾段 = 站点路径。 */
+
+    @GetMapping("/verify/{token}/**")
+    public void verifyGet(@PathVariable String token, HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        if (!verifyService.tokenValid(token)) {
+            response.sendError(401, "校验代理 Token 不正确");
+            return;
+        }
+        verifyService.forward(request, response, wildcardPath(request));
+    }
+
+    @PostMapping("/verify/{token}/**")
+    public void verifyPost(@PathVariable String token, HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        if (!verifyService.tokenValid(token)) {
+            response.sendError(401, "校验代理 Token 不正确");
+            return;
+        }
+        verifyService.forward(request, response, wildcardPath(request));
+    }
+
+    /** 提取 /api/hanime/verify/{token} 之后的尾段（站点路径；无尾段 = 站点首页） */
+    private static String wildcardPath(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        String prefix = HanimeVerifyService.VERIFY_PREFIX;
+        int tokenStart = prefix.length();
+        int slash = uri.indexOf('/', tokenStart);
+        return slash < 0 ? "/" : uri.substring(slash);
     }
 
     /** 搜索：query 可空（空 = 按 sort 浏览「最新」）；genre/sort 透传站点原生参数；page 从 1 起 */
